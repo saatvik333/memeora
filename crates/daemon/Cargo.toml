@@ -1,0 +1,18 @@
+[package]
+name = "memeora-daemon"
+description = "memeora long-lived daemon: holds models + DB, serves IPC, sole DB writer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "memeora-daemon"
+path = "src/main.rs"
+
+[dependencies]
+memeora-core.workspace = true
+memeora-proto.workspace = true
+memeora-mcp.workspace = true

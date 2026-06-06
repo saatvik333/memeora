@@ -1,0 +1,17 @@
+[package]
+name = "memeora-hook"
+description = "Multi-host hook binary for Claude Code / Codex / Antigravity command-hooks"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "memeora-hook"
+path = "src/main.rs"
+
+[dependencies]
+memeora-client.workspace = true
+memeora-proto.workspace = true

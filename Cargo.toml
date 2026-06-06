@@ -1,0 +1,22 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/saatvik333/memeora"
+authors = ["the memeora authors"]
+
+# Shared internal crates — referenced by member crates via `.workspace = true`.
+[workspace.dependencies]
+memeora-core = { path = "crates/core" }
+memeora-proto = { path = "crates/proto" }
+memeora-client = { path = "crates/client" }
+memeora-mcp = { path = "crates/mcp" }
+
+[profile.release]
+lto = "thin"
+strip = true
