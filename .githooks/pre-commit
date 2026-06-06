@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# memeora pre-commit hook — runs the local CI gate so failures are caught here,
+# not on GitHub. Tracked in-repo; enable once with:
+#
+#     git config core.hooksPath .githooks
+#
+# Bypass for a single commit with:  git commit --no-verify
+set -e
+ROOT="$(git rev-parse --show-toplevel)"
+exec "$ROOT/scripts/check.sh"

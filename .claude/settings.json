@@ -10,6 +10,8 @@
       "Bash(cargo run:*)",
       "Bash(cargo add:*)",
       "Bash(cargo nextest:*)",
+      "Bash(cargo deny:*)",
+      "Bash(cargo install:*)",
       "Bash(rustfmt:*)",
       "Bash(git status:*)",
       "Bash(git diff:*)",
@@ -17,6 +19,11 @@
       "Bash(git log:*)",
       "Bash(git show:*)",
       "Bash(git commit:*)",
+      "Bash(git config:*)",
+      "Bash(gh run:*)",
+      "Bash(gh pr:*)",
+      "Bash(scripts/check.sh:*)",
+      "Bash(./scripts/check.sh:*)",
       "Bash(bun:*)"
     ]
   },

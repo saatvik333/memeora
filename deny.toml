@@ -4,6 +4,9 @@
 [advisories]
 version = 2
 yanked = "deny"
+# Only fail on unmaintained crates we depend on *directly*. Transitive unmaintained
+# crates in the ONNX/ML stack (e.g. `paste`, RUSTSEC-2024-0436) are out of our control.
+unmaintained = "workspace"
 
 [licenses]
 version = 2
@@ -22,6 +25,9 @@ allow = [
     # CA-certificate bundle (webpki-roots) pulled by hf-hub's model downloader
     # under the `fastembed` feature. Permissive data license.
     "CDLA-Permissive-2.0",
+    # libfuzzer-sys, via rav1e -> ravif -> image -> fastembed. OSI-approved,
+    # FSF Free/Libre, permissive (MIT/BSD-like).
+    "NCSA",
 ]
 confidence-threshold = 0.9
 
