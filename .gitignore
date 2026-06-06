@@ -1,5 +1,24 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+
+# Node / TS (dashboard, opencode shim)
 node_modules/
 dist/
+.svelte-kit/
+*.tsbuildinfo
+
+# memeora runtime data & models
 .memeora/
+/models/*.onnx
+/models/*.bin
 *.db
+*.db-wal
+*.db-shm
+
+# Env & local
 .env
+.env.local
+.DS_Store
+*.log
