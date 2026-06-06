@@ -6,10 +6,12 @@ memeora gives your AI coding tools **persistent memory** — it learns facts fro
 builds a knowledge graph, and recalls the right context at the right time. It's a free,
 **local-first**, open alternative to hosted memory APIs: **no required LLM, no API key, works offline.**
 
-> **Status:** Steps 1–2 implemented — SQLite + statically-linked `sqlite-vec` KNN + FTS5
-> behind the `VectorStore` trait (container-tag scoping), plus the `EmbeddingProvider`
-> trait with a content-hash cache and a local `fastembed` backend (opt-in feature).
-> Retrieval (RRF hybrid search) is next. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+> **Status:** Steps 1–3 implemented — SQLite + statically-linked `sqlite-vec` KNN + FTS5
+> behind the `VectorStore` trait (container-tag scoping); the `EmbeddingProvider` trait with
+> a content-hash cache and a local `fastembed` backend; and hybrid retrieval — dense + BM25
+> fused with **RRF**, expiry filtering, and an optional cross-encoder reranker (all opt-in
+> ONNX behind the `fastembed` feature). Profiles + extraction next.
+> See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## Highlights
 - **Rust** engine + daemon + MCP server + hook binary + CLI → one self-contained distributable.

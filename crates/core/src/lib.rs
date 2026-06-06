@@ -11,10 +11,12 @@ pub mod container_tag;
 pub mod db;
 pub mod embed;
 mod error;
+pub mod search;
 pub mod store;
 
 pub use embed::{CachingEmbedder, EmbeddingProvider, EmbeddingSpace};
 pub use error::{Error, Result};
+pub use search::{RerankHit, Reranker, SearchMode, SearchParams, rerank_memories, search};
 pub use store::sqlite::SqliteStore;
 pub use store::{Memory, MemoryKind, ScoredMemory, VectorStore, now_unix};
 
