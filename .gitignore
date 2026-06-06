@@ -2,6 +2,8 @@
 /target/
 **/*.rs.bk
 *.pdb
+# memeora ships binaries — commit the lockfile for reproducible builds
+!Cargo.lock
 
 # Node / TS (dashboard, opencode shim)
 node_modules/
