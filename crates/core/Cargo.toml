@@ -8,8 +8,15 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[features]
+default = []
+# Local ONNX embeddings via fastembed. Opt-in here so `core`'s unit tests stay
+# fast and fully offline (no ONNX Runtime download); the daemon/cli enable it.
+fastembed = ["dep:fastembed"]
+
 [dependencies]
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 rusqlite_migration = "2.6.0"
 sha2 = "0.11.0"
 sqlite-vec = "0.1.9"
+fastembed = { version = "5", optional = true }

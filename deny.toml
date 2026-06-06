@@ -19,6 +19,9 @@ allow = [
     "Zlib",
     "MPL-2.0",
     "CC0-1.0",
+    # CA-certificate bundle (webpki-roots) pulled by hf-hub's model downloader
+    # under the `fastembed` feature. Permissive data license.
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.9
 

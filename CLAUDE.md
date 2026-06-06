@@ -22,7 +22,9 @@ Claude Code, Codex, Antigravity & OpenCode. Local-first, no required LLM, no API
 ## Key decisions (see docs/ARCHITECTURE.md for full rationale)
 - **Rust-first**; only OpenCode's in-process plugin is a thin TS shim.
 - **MVP = `fastembed` embeddings only + Tier-0 heuristic extraction.** `gline-rs`/`gliclass-rs`
-  NER are **deferred behind a feature** due to an `ort` version conflict (fastembed rc.11 vs gline rc.9).
+  NER are **deferred behind a feature** due to an `ort` version conflict (fastembed's `ort` rc —
+  currently rc.12 — vs gline-rs's rc.9; `links` rule forbids two versions). `fastembed` is an
+  **opt-in feature of `memeora-core`** (off by default so core tests stay offline; binaries enable it).
 - Storage: `rusqlite` + **statically-registered** `sqlite-vec` + FTS5 + RRF hybrid search.
 - Daemon is the sole DB writer (writer-actor thread + WAL; never block tokio with sync SQLite).
 - MVP engine: add/recall/hybrid/profiles/dedup/conservative-updates. Defer `derives` + auto-forgetting.

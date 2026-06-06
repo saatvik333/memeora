@@ -16,6 +16,9 @@ pub enum Error {
         /// Dimensionality of the supplied vector.
         got: usize,
     },
+    /// An embedding provider failed (model load, inference, or a poisoned lock).
+    /// Carries a message because the underlying error type varies by backend.
+    Embedding(String),
 }
 
 impl fmt::Display for Error {
@@ -26,6 +29,7 @@ impl fmt::Display for Error {
             Error::DimMismatch { expected, got } => {
                 write!(f, "embedding dim mismatch: expected {expected}, got {got}")
             }
+            Error::Embedding(msg) => write!(f, "embedding error: {msg}"),
         }
     }
 }
@@ -35,7 +39,7 @@ impl std::error::Error for Error {
         match self {
             Error::Sqlite(e) => Some(e),
             Error::Migration(e) => Some(e),
-            Error::DimMismatch { .. } => None,
+            Error::DimMismatch { .. } | Error::Embedding(_) => None,
         }
     }
 }
