@@ -24,3 +24,6 @@ dist/
 .env.local
 .DS_Store
 *.log
+
+# graphify knowledge-graph output (regenerable)
+graphify-out/
