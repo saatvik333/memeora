@@ -71,7 +71,9 @@ pub trait EmbeddingProvider: Send + Sync {
     /// providers whose models use a distinct query encoding override this.
     fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
         let mut out = self.embed_documents(&[text])?;
-        Ok(out.pop().unwrap_or_default())
+        out.pop().ok_or_else(|| {
+            crate::Error::Embedding("provider returned no embedding for query".into())
+        })
     }
 }
 

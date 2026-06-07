@@ -64,8 +64,10 @@ enum Event {
 fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
 
+    // Read stdin best-effort: a read failure (broken pipe, non-UTF-8) must not make
+    // the hook exit non-zero, which some hosts treat as a hard error.
     let mut input = String::new();
-    std::io::stdin().read_to_string(&mut input)?;
+    let _ = std::io::stdin().read_to_string(&mut input);
     let payload: Value = serde_json::from_str(&input).unwrap_or(Value::Null);
 
     let scope = scope_from_payload(args.host, &payload);
@@ -168,7 +170,7 @@ fn capture(socket: &str, scope: &str, host: Host, payload: &Value) {
     let Ok(jsonl) = std::fs::read_to_string(&path) else {
         return;
     };
-    let text = transcript_to_text(&jsonl, 40);
+    let text = redact(&transcript_to_text(&jsonl, 40));
     if text.trim().is_empty() {
         return;
     }
@@ -176,6 +178,81 @@ fn capture(socket: &str, scope: &str, host: Host, payload: &Value) {
         c.ingest(scope, &text)?;
         Ok(())
     });
+}
+
+/// Best-effort redaction of obvious secrets before a transcript is persisted.
+///
+/// Conservative and heuristic (not a substitute for the user not pasting secrets):
+/// masks known credential-prefixed tokens, `key=value`/`key: value` pairs with a
+/// sensitive key, and long high-entropy blobs.
+fn redact(text: &str) -> String {
+    text.lines()
+        .map(|line| {
+            line.split(' ')
+                .map(redact_word)
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Sensitive key substrings for `key=value` redaction.
+const SENSITIVE_KEYS: &[&str] = &[
+    "password",
+    "passwd",
+    "secret",
+    "token",
+    "api_key",
+    "apikey",
+    "access_key",
+    "auth",
+];
+
+/// Known secret token prefixes (GitHub, OpenAI, AWS, Google, Slack, GitLab).
+const SECRET_PREFIXES: &[&str] = &[
+    "sk-",
+    "ghp_",
+    "gho_",
+    "ghu_",
+    "ghs_",
+    "github_pat_",
+    "xoxb-",
+    "xoxp-",
+    "AKIA",
+    "AIza",
+    "glpat-",
+];
+
+/// Redact a single whitespace-delimited word, preserving non-secret text.
+fn redact_word(word: &str) -> String {
+    // `key=value` / `key: value` with a sensitive key → mask only the value.
+    if let Some(idx) = word.find(['=', ':']) {
+        let (key, rest) = word.split_at(idx);
+        let value = &rest[1..];
+        let key_lower = key.to_ascii_lowercase();
+        if !value.is_empty() && SENSITIVE_KEYS.iter().any(|s| key_lower.contains(s)) {
+            return format!("{key}{}[REDACTED]", &rest[..1]);
+        }
+    }
+    if looks_secret(word) {
+        return "[REDACTED]".to_string();
+    }
+    word.to_string()
+}
+
+/// Whether a standalone token looks like a credential.
+fn looks_secret(word: &str) -> bool {
+    if SECRET_PREFIXES.iter().any(|p| word.starts_with(p)) {
+        return true;
+    }
+    // Long, high-entropy blob: base64/hex-ish with both letters and digits.
+    word.len() >= 32
+        && word
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_+/=.".contains(c))
+        && word.chars().any(|c| c.is_ascii_alphabetic())
+        && word.chars().any(|c| c.is_ascii_digit())
 }
 
 /// The transcript path field for the host (with a defensive fallback to the
@@ -243,6 +320,9 @@ fn extract_text(value: &Value) -> String {
         Some(Value::String(s)) => s.clone(),
         Some(Value::Array(blocks)) => blocks
             .iter()
+            // Only plain text blocks — skip tool_use/tool_result/thinking, which
+            // aren't conversation and can leak tool output into memory.
+            .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
             .filter_map(|b| b.get("text").and_then(Value::as_str))
             .collect::<Vec<_>>()
             .join(" "),
@@ -331,6 +411,35 @@ mod tests {
         .join("\n");
         let text = transcript_to_text(&jsonl, 40);
         assert_eq!(text, "user: I prefer rust\nassistant: noted");
+    }
+
+    #[test]
+    fn redact_masks_secrets_but_keeps_prose() {
+        let out = redact("deploy with key sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ012345 today");
+        assert!(out.contains("[REDACTED]"));
+        assert!(out.contains("deploy with key"));
+        assert!(out.contains("today"));
+        assert!(!out.contains("sk-ABCDEFG"));
+
+        // key=value with a sensitive key masks only the value.
+        let kv = redact("set password=hunter2supersecret in config");
+        assert!(kv.contains("password=[REDACTED]"));
+        assert!(kv.contains("in config"));
+
+        // Ordinary text is untouched.
+        assert_eq!(redact("I prefer dark mode"), "I prefer dark mode");
+    }
+
+    #[test]
+    fn extract_text_skips_non_text_blocks() {
+        let value = serde_json::json!({
+            "message": { "role": "assistant", "content": [
+                { "type": "text", "text": "hello" },
+                { "type": "tool_use", "text": "secret tool input" },
+                { "type": "tool_result", "text": "file dump" },
+            ]}
+        });
+        assert_eq!(extract_text(&value), "hello");
     }
 
     #[test]

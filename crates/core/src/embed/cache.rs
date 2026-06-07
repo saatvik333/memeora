@@ -74,6 +74,13 @@ impl<E: EmbeddingProvider> EmbeddingProvider for CachingEmbedder<E> {
 
         if !miss_texts.is_empty() {
             let embedded = self.inner.embed_documents(&miss_texts)?;
+            if embedded.len() != miss_texts.len() {
+                return Err(crate::Error::Embedding(format!(
+                    "inner provider returned {} vectors for {} texts",
+                    embedded.len(),
+                    miss_texts.len()
+                )));
+            }
             let mut cache = self
                 .cache
                 .lock()
@@ -85,8 +92,11 @@ impl<E: EmbeddingProvider> EmbeddingProvider for CachingEmbedder<E> {
             }
         }
 
-        // Every slot is now filled (cache hit or freshly embedded).
-        Ok(results.into_iter().map(|v| v.unwrap_or_default()).collect())
+        // Every slot is now filled (cache hit or freshly embedded above).
+        results
+            .into_iter()
+            .map(|v| v.ok_or_else(|| crate::Error::Embedding("cache slot left unfilled".into())))
+            .collect()
     }
 }
 

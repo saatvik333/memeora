@@ -181,6 +181,23 @@ memeora must be **easy for the open-source community to extend to new harnesses*
 10. **Release:** `dist` cross-platform installers (portable+assets tier first); model assets + checksums.
 11. **Optional/scale:** Tier 1 NER/relations (once `ort` aligned) → Tier 2 LLM extractor; **LanceDB** store + remote/sync backend; **benchmark harness** (LongMemEval/LoCoMo-style) vs supermemory/mem0.
 
+**Post-review hardening (applied after a full codebase review):** `upsert` is now an
+edge-preserving in-place UPDATE (delete-then-insert previously cascade-deleted a node's
+graph edges via the `relationships` FK); exact re-ingest reinforces via the content id
+(no destructive strength reset); FTS5 `MATCH` input is sanitized (raw user text no longer
+errors the whole recall); `forget` drops the vec row so soft-forgotten memories can't
+starve KNN top-k; the store persists its embedding dim and rejects a dim-mismatched reopen;
+`embed_query` applies the BGE query instruction. **Daemon:** the writer-actor wraps each
+request in `catch_unwind` (a panic no longer zombies the process); **embedding/extraction
+run on the connection threads** (a shared `Arc` embedder/extractor via a `Preparer`), so the
+single writer only does the fast DB critical section — `Ingest`/`Recall` no longer serialize
+all clients behind inference; the job channel is bounded (backpressure) and connections are
+capped; a startup probe refuses to start a second daemon on a live socket (cross-process
+sole-writer). **Protocol:** `Client::connect` performs the version handshake and errors on
+mismatch. **CI:** `deny.toml` gained `[graph] all-features` + tier-1 `targets` so the ML
+stack's licenses/advisories are actually checked. (Deferred: trimming fastembed's
+`image-models` to drop the NCSA exception; bounded LRU on the unused `CachingEmbedder`.)
+
 *(CI from day one, in parallel with step 1: `fmt`/`clippy`/`test`/`cargo-deny` workflow, `rust-toolchain.toml`, committed `Cargo.lock`.)*
 
 ## Critical files (representative)

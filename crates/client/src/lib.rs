@@ -7,22 +7,14 @@
 
 use std::io::{self, BufReader};
 
-use interprocess::local_socket::{GenericFilePath, GenericNamespaced, Name, Stream, prelude::*};
-use memeora_proto::{DEFAULT_SOCKET, MemoryDto, PROTOCOL_VERSION, Request, Response, frame};
+use interprocess::local_socket::{Stream, prelude::*};
+use memeora_proto::{
+    DEFAULT_SOCKET, MemoryDto, PROTOCOL_VERSION, Request, Response, build_name, frame,
+};
 
 /// A connected client to a memeora daemon.
 pub struct Client {
     conn: BufReader<Stream>,
-}
-
-/// Build a local-socket [`Name`]: a value with a path separator is a filesystem
-/// socket path; otherwise a namespaced name. (Mirrors the daemon.)
-fn build_name(socket: &str) -> io::Result<Name<'_>> {
-    if socket.contains('/') || socket.contains('\\') {
-        socket.to_fs_name::<GenericFilePath>()
-    } else {
-        socket.to_ns_name::<GenericNamespaced>()
-    }
 }
 
 impl Client {
@@ -32,11 +24,25 @@ impl Client {
     }
 
     /// Connect to a daemon on a specific socket name/path.
+    ///
+    /// Performs the protocol handshake and fails with [`io::ErrorKind::Unsupported`]
+    /// if the daemon speaks a different [`PROTOCOL_VERSION`], so a version skew is a
+    /// clear error here rather than an opaque deserialization failure later.
     pub fn connect(socket: &str) -> io::Result<Self> {
         let stream = Stream::connect(build_name(socket)?)?;
-        Ok(Client {
+        let mut client = Client {
             conn: BufReader::new(stream),
-        })
+        };
+        let daemon_version = client.hello()?;
+        if daemon_version != PROTOCOL_VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "protocol version mismatch: client speaks v{PROTOCOL_VERSION}, daemon speaks v{daemon_version}"
+                ),
+            ));
+        }
+        Ok(client)
     }
 
     /// Send one request and read its response.

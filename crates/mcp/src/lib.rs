@@ -18,6 +18,10 @@ use serde::Deserialize;
 #[derive(Clone)]
 pub struct MemoryServer {
     socket: String,
+    /// Scope used when a tool call omits one. Resolved once at startup (see
+    /// [`default_scope`]) because an MCP stdio server's process cwd is fixed at
+    /// launch and isn't a reliable per-call project signal.
+    default_scope: String,
 }
 
 /// Arguments for `recall`.
@@ -51,19 +55,33 @@ pub struct ScopeArgs {
     pub limit: Option<usize>,
 }
 
-/// Resolve a caller-supplied scope to a concrete container tag. An empty or
-/// missing scope defaults to the project tag for the server's working directory,
-/// so MCP tools and the `memeora-hook` capture path agree on the same scope.
-fn resolve_scope(scope: Option<String>) -> String {
+/// Resolve a caller-supplied scope to a concrete container tag, falling back to
+/// the server's `default` when the caller omits one (or passes blank).
+fn resolve_scope(scope: Option<String>, default: &str) -> String {
     match scope {
         Some(s) if !s.trim().is_empty() => s,
-        _ => {
-            let cwd = std::env::current_dir()
+        _ => default.to_string(),
+    }
+}
+
+/// The scope used when a tool call omits one.
+///
+/// Prefers `MEMEORA_PROJECT_ROOT` (the host can set this to the actual project
+/// dir, since the MCP server's process cwd is fixed at launch and unreliable),
+/// then the process cwd, then a stable named fallback (never an empty bucket).
+fn default_scope() -> String {
+    let root = std::env::var("MEMEORA_PROJECT_ROOT")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            std::env::current_dir()
                 .ok()
                 .map(|p| p.display().to_string())
-                .unwrap_or_default();
-            project_tag(&cwd)
-        }
+                .filter(|s| !s.is_empty())
+        });
+    match root {
+        Some(path) => project_tag(&path),
+        None => "memeora_project_unknown".to_string(),
     }
 }
 
@@ -71,7 +89,10 @@ fn resolve_scope(scope: Option<String>) -> String {
 impl MemoryServer {
     /// Build a server that talks to the daemon at `socket`.
     pub fn new(socket: String) -> Self {
-        Self { socket }
+        Self {
+            socket,
+            default_scope: default_scope(),
+        }
     }
 
     #[tool(description = "Search stored memories within a scope (hybrid dense + keyword search).")]
@@ -80,7 +101,7 @@ impl MemoryServer {
         Parameters(args): Parameters<RecallArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let socket = self.socket.clone();
-        let scope = resolve_scope(args.scope);
+        let scope = resolve_scope(args.scope, &self.default_scope);
         let memories = blocking(move || {
             Client::connect(&socket)?.recall(&scope, &args.query, args.k.unwrap_or(10))
         })
@@ -96,7 +117,7 @@ impl MemoryServer {
         Parameters(args): Parameters<RememberArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let socket = self.socket.clone();
-        let scope = resolve_scope(args.scope);
+        let scope = resolve_scope(args.scope, &self.default_scope);
         let kind = args.kind.unwrap_or_else(|| "fact".to_string());
         let id =
             blocking(move || Client::connect(&socket)?.add(&scope, &args.content, &kind)).await?;
@@ -113,7 +134,7 @@ impl MemoryServer {
         Parameters(args): Parameters<ScopeArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let socket = self.socket.clone();
-        let scope = resolve_scope(args.scope);
+        let scope = resolve_scope(args.scope, &self.default_scope);
         let (statics, dynamics) =
             blocking(move || Client::connect(&socket)?.context(&scope)).await?;
         let text = format!(
@@ -130,7 +151,7 @@ impl MemoryServer {
         Parameters(args): Parameters<ScopeArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let socket = self.socket.clone();
-        let scope = resolve_scope(args.scope);
+        let scope = resolve_scope(args.scope, &self.default_scope);
         let memories =
             blocking(move || Client::connect(&socket)?.list(&scope, args.limit.unwrap_or(20)))
                 .await?;
@@ -152,7 +173,20 @@ where
     tokio::task::spawn_blocking(f)
         .await
         .map_err(|e| ErrorData::internal_error(e.to_string(), None))?
-        .map_err(|e| ErrorData::internal_error(e.to_string(), None))
+        .map_err(map_io_err)
+}
+
+/// Map a client I/O error to an MCP error, giving an actionable hint when the
+/// daemon is simply unreachable rather than a generic internal error.
+fn map_io_err(e: std::io::Error) -> ErrorData {
+    use std::io::ErrorKind::*;
+    match e.kind() {
+        ConnectionRefused | NotFound | ConnectionReset | BrokenPipe => ErrorData::internal_error(
+            format!("memeora daemon unreachable ({e}); is `memeora-daemon` running?"),
+            None,
+        ),
+        _ => ErrorData::internal_error(e.to_string(), None),
+    }
 }
 
 /// Render memories as compact text for an agent to read.
@@ -174,16 +208,26 @@ mod tests {
     #[test]
     fn explicit_scope_is_passed_through() {
         assert_eq!(
-            resolve_scope(Some("repo_memeora".into())),
+            resolve_scope(Some("repo_memeora".into()), "default_tag"),
             "repo_memeora".to_string()
         );
     }
 
     #[test]
-    fn missing_or_blank_scope_falls_back_to_project_tag() {
-        let default = resolve_scope(None);
-        assert!(default.starts_with("memeora_project_"));
+    fn missing_or_blank_scope_uses_default() {
+        assert_eq!(resolve_scope(None, "default_tag"), "default_tag");
         // Blank strings resolve the same way as a missing scope.
-        assert_eq!(resolve_scope(Some("   ".into())), default);
+        assert_eq!(
+            resolve_scope(Some("   ".into()), "default_tag"),
+            "default_tag"
+        );
+    }
+
+    #[test]
+    fn default_scope_is_never_an_empty_bucket() {
+        // Whatever the environment, the default is a concrete, non-empty tag.
+        let s = default_scope();
+        assert!(!s.is_empty());
+        assert!(s.starts_with("memeora_project_"));
     }
 }

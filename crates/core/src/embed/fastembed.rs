@@ -25,6 +25,9 @@ use crate::error::{Error, Result};
 pub struct FastEmbedder {
     model: Mutex<TextEmbedding>,
     space: EmbeddingSpace,
+    /// Instruction prepended to *queries* for asymmetric-retrieval models (BGE).
+    /// `None` for symmetric models, where a query is embedded like a document.
+    query_prefix: Option<String>,
 }
 
 impl FastEmbedder {
@@ -39,6 +42,7 @@ impl FastEmbedder {
     pub fn new(model: EmbeddingModel, cache_dir: Option<PathBuf>) -> Result<Self> {
         let dim = model_dim(&model)?;
         let model_name = format!("{model:?}");
+        let query_prefix = query_instruction(&model);
 
         let mut opts = InitOptions::new(model);
         if let Some(dir) = cache_dir {
@@ -49,6 +53,7 @@ impl FastEmbedder {
         Ok(FastEmbedder {
             model: Mutex::new(embedder),
             space: EmbeddingSpace::new("fastembed", model_name, dim),
+            query_prefix,
         })
     }
 }
@@ -60,6 +65,20 @@ fn model_dim(model: &EmbeddingModel) -> Result<usize> {
         .find(|info| &info.model == model)
         .map(|info| info.dim)
         .ok_or_else(|| Error::Embedding(format!("unknown fastembed model: {model:?}")))
+}
+
+/// The query instruction for asymmetric-retrieval models. fastembed does not
+/// auto-apply prefixes, so for BGE-EN-v1.5 (our default) queries must be prefixed
+/// with the model's search instruction while passages are embedded as-is.
+fn query_instruction(model: &EmbeddingModel) -> Option<String> {
+    use EmbeddingModel::*;
+    match model {
+        BGESmallENV15 | BGESmallENV15Q | BGEBaseENV15 | BGEBaseENV15Q | BGELargeENV15
+        | BGELargeENV15Q => {
+            Some("Represent this sentence for searching relevant passages: ".to_string())
+        }
+        _ => None,
+    }
 }
 
 impl EmbeddingProvider for FastEmbedder {
@@ -76,6 +95,22 @@ impl EmbeddingProvider for FastEmbedder {
         model
             .embed(texts, None)
             .map_err(|e| Error::Embedding(e.to_string()))
+    }
+
+    fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
+        // Asymmetric models (BGE) need the query instruction prepended; symmetric
+        // models embed the query exactly like a document.
+        let prefixed;
+        let query = match &self.query_prefix {
+            Some(prefix) => {
+                prefixed = format!("{prefix}{text}");
+                prefixed.as_str()
+            }
+            None => text,
+        };
+        self.embed_documents(&[query])?
+            .pop()
+            .ok_or_else(|| Error::Embedding("fastembed returned no embedding for query".into()))
     }
 }
 

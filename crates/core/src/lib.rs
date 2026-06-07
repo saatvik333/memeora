@@ -20,7 +20,10 @@ pub mod store;
 pub use embed::{CachingEmbedder, EmbeddingProvider, EmbeddingSpace};
 pub use error::{Error, Result};
 pub use extract::{Candidate, Extractor, HeuristicExtractor};
-pub use ingest::{IngestOutcome, IngestParams, ingest, ingest_candidates};
+pub use ingest::{
+    IngestOutcome, IngestParams, PreparedCandidate, embed_candidates, ingest, ingest_candidates,
+    ingest_prepared,
+};
 pub use profile::{Profile, ProfileCache, ProfileParams, build_profile};
 pub use search::{RerankHit, Reranker, SearchMode, SearchParams, rerank_memories, search};
 pub use store::sqlite::SqliteStore;

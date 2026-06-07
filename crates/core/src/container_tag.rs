@@ -10,10 +10,27 @@ use std::fmt::Write;
 use sha2::{Digest, Sha256};
 
 /// First 8 bytes of SHA-256, hex-encoded (16 chars).
+///
+/// Sized for low-cardinality inputs (a git email, a project path). For
+/// content-addressed ids over unbounded input, use [`sha32`] instead.
 pub fn sha16(input: &str) -> String {
+    hex_prefix(input, 8)
+}
+
+/// First 16 bytes of SHA-256, hex-encoded (32 chars).
+///
+/// Used for content-addressed memory ids: 128 bits keeps the birthday-bound
+/// collision probability negligible even for very large per-tag stores, where the
+/// 64-bit [`sha16`] would not.
+pub fn sha32(input: &str) -> String {
+    hex_prefix(input, 16)
+}
+
+/// Hex-encode the first `bytes` bytes of the SHA-256 of `input`.
+fn hex_prefix(input: &str, bytes: usize) -> String {
     let digest = Sha256::digest(input.as_bytes());
-    let mut s = String::with_capacity(16);
-    for b in &digest[..8] {
+    let mut s = String::with_capacity(bytes * 2);
+    for b in &digest[..bytes] {
         let _ = write!(s, "{b:02x}");
     }
     s
@@ -63,6 +80,17 @@ mod tests {
         assert_eq!(a.len(), 16);
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
         assert_ne!(sha16("a@b.com"), sha16("c@d.com"));
+    }
+
+    #[test]
+    fn sha32_is_deterministic_and_32_chars() {
+        let a = sha32("some memory content");
+        assert_eq!(a, sha32("some memory content"));
+        assert_eq!(a.len(), 32);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(sha32("content a"), sha32("content b"));
+        // Wider than sha16 (no shared prefix length assumption beyond the first 16).
+        assert!(sha32("x").starts_with(&sha16("x")));
     }
 
     #[test]

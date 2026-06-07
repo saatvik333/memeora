@@ -1,6 +1,24 @@
 # cargo-deny configuration — enforced in CI.
 # See https://embarkstudios.github.io/cargo-deny/
 
+[graph]
+# Evaluate the FULL feature graph (incl. the `fastembed`/ONNX stack, off by default
+# in `core`) so CI's `cargo deny check` covers the same surface as the
+# `--all-features` build — otherwise the ML stack's licenses/advisories go
+# unchecked in CI. Mirrors `scripts/check.sh`'s `cargo deny --all-features`.
+all-features = true
+# Check every release target, not just CI's host, so platform-only deps
+# (e.g. interprocess's Windows named-pipe crates) are license/advisory-checked too.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+
 [advisories]
 version = 2
 yanked = "deny"

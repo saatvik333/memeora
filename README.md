@@ -43,10 +43,10 @@ builds a knowledge graph, and recalls the right context at the right time. It's 
 | `crates/core` | engine: storage, embeddings, extraction, graph, hybrid search, profiles |
 | `crates/proto` | versioned IPC contract (public) |
 | `crates/client` | Rust client SDK |
-| `crates/daemon` | tokio daemon: holds models + DB, sole writer, async queue |
-| `crates/mcp` | `rmcp` MCP server (memory / recall / context / list) |
+| `crates/daemon` | blocking writer-actor daemon: holds models + DB, sole writer; embeds off the writer thread |
+| `crates/mcp` | `rmcp` MCP server (recall / remember / context / list) |
 | `crates/hook` | `memeora-hook` multi-host command-hook binary |
-| `crates/cli` | `memeora` CLI (install / serve / doctor / index / dashboard) |
+| `crates/cli` | `memeora` CLI (doctor / add / ingest / recall / context / list / forget / scope) |
 
 ## Build
 ```sh
@@ -55,6 +55,11 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 Toolchain is pinned in `rust-toolchain.toml` (Rust 1.95, edition 2024).
+
+> **Note:** `cargo test --workspace` compiles the `fastembed`/ONNX stack (feature
+> unification pulls it in via the daemon), so the first run downloads/builds it. For
+> the fast, fully-offline core loop use `cargo test -p memeora-core`. The full gate
+> (`scripts/check.sh`) mirrors CI and runs everything `--all-features`.
 
 ## Contributing
 See [`CONTRIBUTING.md`](CONTRIBUTING.md). Adding support for a new harness is designed to be easy —

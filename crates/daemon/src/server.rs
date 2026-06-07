@@ -9,38 +9,45 @@
 //! SQLite. (tokio enters later only for the MCP HTTP transport and the dashboard.)
 
 use std::io::{self, BufReader};
-use std::sync::mpsc::{self, Sender};
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Sender, SyncSender};
 use std::thread;
 
-use interprocess::local_socket::{
-    GenericFilePath, GenericNamespaced, ListenerOptions, Name, Stream, prelude::*,
-};
-use memeora_proto::{Request, Response, frame};
+use interprocess::local_socket::{ListenerOptions, Stream, prelude::*};
+use memeora_proto::{Request, Response, build_name, frame};
 
 use crate::Engine;
+use crate::engine::{Prepared, Preparer};
 
-/// A request plus the channel its response goes back on.
+/// Bound on queued-but-unhandled jobs. A full queue applies backpressure
+/// (`SyncSender::send` blocks the connection thread) instead of growing unbounded.
+const JOB_QUEUE_DEPTH: usize = 1024;
+
+/// Bound on concurrent connection threads, so a flood of clients can't exhaust
+/// threads/FDs. Excess connections are dropped (the client can retry).
+const MAX_CONNECTIONS: usize = 256;
+
+/// A prepared request plus the channel its response goes back on.
 struct Job {
-    request: Request,
+    prepared: Prepared,
     reply: Sender<Response>,
 }
 
-/// Build a local-socket [`Name`] from a string: a value containing a path
-/// separator is a filesystem socket path; otherwise a namespaced name.
-pub fn build_name(socket: &str) -> io::Result<Name<'_>> {
-    if socket.contains('/') || socket.contains('\\') {
-        socket.to_fs_name::<GenericFilePath>()
-    } else {
-        socket.to_ns_name::<GenericNamespaced>()
-    }
-}
-
-/// Spawn the writer-actor: it owns the `Engine` and handles jobs serially.
-fn spawn_writer(mut engine: Engine) -> Sender<Job> {
-    let (tx, rx) = mpsc::channel::<Job>();
+/// Spawn the writer-actor: it owns the `Engine` and applies jobs serially.
+///
+/// Each job is handled under [`catch_unwind`] so a panic in one request degrades
+/// to a `Response::Error` for that client instead of killing the writer thread
+/// (which would leave the daemon a zombie that accepts but never answers).
+fn spawn_writer(mut engine: Engine) -> SyncSender<Job> {
+    let (tx, rx) = mpsc::sync_channel::<Job>(JOB_QUEUE_DEPTH);
     thread::spawn(move || {
         for job in rx {
-            let response = engine.handle(job.request);
+            let response = catch_unwind(AssertUnwindSafe(|| engine.handle_prepared(job.prepared)))
+                .unwrap_or_else(|_| Response::Error {
+                    message: "internal error: the request handler panicked".to_string(),
+                });
             // If the connection is gone, drop the response silently.
             let _ = job.reply.send(response);
         }
@@ -49,20 +56,43 @@ fn spawn_writer(mut engine: Engine) -> Sender<Job> {
 }
 
 /// Serve requests on `socket` until the listener errors fatally. Blocks the
-/// calling thread. `engine` moves onto the dedicated writer thread.
+/// calling thread. `engine` moves onto the dedicated writer thread; embedding and
+/// extraction run on the connection threads via a shared [`Preparer`].
 pub fn serve(engine: Engine, socket: &str) -> io::Result<()> {
-    let name = build_name(socket)?;
+    // Sole-writer guard: if a daemon already answers on this socket, refuse to
+    // start rather than `try_overwrite` it and end up with two writers on one DB.
+    if Stream::connect(build_name(socket)?).is_ok() {
+        return Err(io::Error::new(
+            io::ErrorKind::AddrInUse,
+            format!("a memeora-daemon is already listening on {socket}"),
+        ));
+    }
+
+    let preparer = engine.preparer();
     let listener = ListenerOptions::new()
-        .name(name)
+        .name(build_name(socket)?)
+        // No live daemon (checked above); overwrite only a stale socket file.
         .try_overwrite(true)
         .create_sync()?;
     let writer = spawn_writer(engine);
+    let active = Arc::new(AtomicUsize::new(0));
 
     for conn in listener.incoming() {
         match conn {
             Ok(stream) => {
+                if active.load(Ordering::Relaxed) >= MAX_CONNECTIONS {
+                    eprintln!("memeora-daemon: connection limit reached, dropping connection");
+                    drop(stream);
+                    continue;
+                }
+                active.fetch_add(1, Ordering::Relaxed);
                 let writer = writer.clone();
-                thread::spawn(move || handle_conn(stream, &writer));
+                let preparer = preparer.clone();
+                let active = Arc::clone(&active);
+                thread::spawn(move || {
+                    handle_conn(stream, &writer, &preparer);
+                    active.fetch_sub(1, Ordering::Relaxed);
+                });
             }
             Err(e) => eprintln!("memeora-daemon: accept error: {e}"),
         }
@@ -70,9 +100,10 @@ pub fn serve(engine: Engine, socket: &str) -> io::Result<()> {
     Ok(())
 }
 
-/// Serve one connection: read framed requests, forward to the writer, frame back
-/// the responses, until the peer closes or an I/O error occurs.
-fn handle_conn(stream: Stream, writer: &Sender<Job>) {
+/// Serve one connection: read framed requests, prepare (embed/extract) them on
+/// this thread, forward to the writer, frame back the responses, until the peer
+/// closes or an I/O error occurs.
+fn handle_conn(stream: Stream, writer: &SyncSender<Job>, preparer: &Preparer) {
     let mut reader = BufReader::new(stream);
     loop {
         let request = match frame::read_message::<_, Request>(&mut reader) {
@@ -81,17 +112,27 @@ fn handle_conn(stream: Stream, writer: &Sender<Job>) {
             Err(_) => break,   // truncated / bad frame
         };
 
-        let (reply_tx, reply_rx) = mpsc::channel();
-        if writer
-            .send(Job {
-                request,
-                reply: reply_tx,
-            })
-            .is_err()
-        {
-            break; // writer thread gone
-        }
-        let Ok(response) = reply_rx.recv() else { break };
+        // Embedding/extraction happens here (off the writer), parallel across clients.
+        let response = match preparer.prepare(request) {
+            Ok(prepared) => {
+                let (reply_tx, reply_rx) = mpsc::channel();
+                if writer
+                    .send(Job {
+                        prepared,
+                        reply: reply_tx,
+                    })
+                    .is_err()
+                {
+                    break; // writer thread gone
+                }
+                let Ok(response) = reply_rx.recv() else { break };
+                response
+            }
+            Err(err) => Response::Error {
+                message: err.to_string(),
+            },
+        };
+
         if frame::write_message(reader.get_mut(), &response).is_err() {
             break;
         }
@@ -188,5 +229,18 @@ mod tests {
             Response::Memories { memories } => assert_eq!(memories.len(), 1),
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn second_daemon_on_same_socket_is_refused() {
+        let socket = "memeora-test-singleton.sock";
+        thread::spawn(move || {
+            let _ = serve(test_engine(), socket);
+        });
+        // Wait until the first daemon is accepting connections.
+        let _conn = connect(socket);
+        // A second daemon on the same socket must refuse rather than hijack it.
+        let err = serve(test_engine(), socket).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AddrInUse);
     }
 }

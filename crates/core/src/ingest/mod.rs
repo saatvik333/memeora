@@ -13,11 +13,17 @@
 //! Deferred (needs the gated NER/NLI stack): `updates` edges and
 //! contradiction-based supersession.
 
-use crate::Result;
-use crate::container_tag::sha16;
+use crate::container_tag::sha32;
 use crate::embed::EmbeddingProvider;
+use crate::error::{Error, Result};
 use crate::extract::{Candidate, Extractor};
 use crate::store::{EdgeKind, VectorStore};
+
+/// A candidate paired with its document embedding, ready for the DB write path.
+///
+/// Produced by [`embed_candidates`] (which may run off the daemon's writer thread)
+/// and consumed by [`ingest_prepared`] (which holds the writer).
+pub type PreparedCandidate = (Candidate, Vec<f32>);
 
 /// Tuning for [`ingest`].
 ///
@@ -62,10 +68,10 @@ pub struct IngestOutcome {
     pub edges_added: usize,
 }
 
-/// Deterministic, container-scoped id for a memory's content.
+/// Deterministic, container-scoped id for a memory's content (128-bit, content-addressed).
 fn content_id(container_tag: &str, content: &str) -> String {
     // NUL separator avoids tag/content boundary collisions.
-    sha16(&format!("{container_tag}\u{0}{content}"))
+    sha32(&format!("{container_tag}\u{0}{content}"))
 }
 
 /// Extract memories from `text`, embed them, and write them into `store` under
@@ -93,31 +99,81 @@ pub fn ingest_candidates(
     candidates: Vec<Candidate>,
     params: &IngestParams,
 ) -> Result<IngestOutcome> {
+    let prepared = embed_candidates(embedder, candidates)?;
+    ingest_prepared(store, container_tag, prepared, params)
+}
+
+/// Embed each candidate's content as a document, pairing it with its vector.
+///
+/// Split out from the store write path so embedding (CPU-heavy, no DB access) can
+/// run off the daemon's single writer thread. Errors if the provider returns the
+/// wrong number of vectors (a contract violation) rather than silently inserting
+/// an empty embedding.
+pub fn embed_candidates(
+    embedder: &dyn EmbeddingProvider,
+    candidates: Vec<Candidate>,
+) -> Result<Vec<PreparedCandidate>> {
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+    let texts: Vec<&str> = candidates.iter().map(|c| c.content.as_str()).collect();
+    let embeddings = embedder.embed_documents(&texts)?;
+    if embeddings.len() != candidates.len() {
+        return Err(Error::Embedding(format!(
+            "embedder returned {} vectors for {} candidates",
+            embeddings.len(),
+            candidates.len()
+        )));
+    }
+    Ok(candidates.into_iter().zip(embeddings).collect())
+}
+
+/// Write already-embedded candidates into `store`, deduping/reinforcing
+/// near-duplicates and linking new memories to moderately-similar neighbors.
+///
+/// The DB-only half of ingestion (no embedding), so it can run alone on the
+/// daemon's writer thread after [`embed_candidates`] has run elsewhere.
+pub fn ingest_prepared(
+    store: &mut dyn VectorStore,
+    container_tag: &str,
+    prepared: Vec<PreparedCandidate>,
+    params: &IngestParams,
+) -> Result<IngestOutcome> {
     let mut outcome = IngestOutcome::default();
 
-    for candidate in candidates {
-        // Embed as a document (the form it will be stored and matched as).
-        let embedding = embedder
-            .embed_documents(&[candidate.content.as_str()])?
-            .pop()
-            .unwrap_or_default();
+    for (candidate, embedding) in prepared {
+        let id = content_id(container_tag, &candidate.content);
+
+        // Exact re-ingest is idempotent: if this content already exists, reinforce
+        // it. (Going through `upsert` here would reset strength/created_at, and the
+        // KNN distance/kind heuristic below can miss the literal-same row.)
+        if store.get(&id)?.is_some() {
+            store.reinforce(&id, params.reinforce_delta)?;
+            outcome.reinforced.push(id);
+            continue;
+        }
 
         // One KNN lookup serves both dedup and linking. Scope the immutable borrow
         // so it ends before the mutable writes below; carry only owned decisions out.
         let (duplicate_id, link_targets) = {
             let neighbors = store.knn(container_tag, &embedding, params.link_candidates.max(1))?;
+            // Reinforce the nearest same-kind near-duplicate (scan, don't just check
+            // rank 1 — a closer different-kind neighbor must not shadow it).
             let duplicate_id = neighbors
-                .first()
-                .filter(|top| {
-                    top.score <= params.dedup_max_distance && top.memory.kind == candidate.kind
-                })
-                .map(|top| top.memory.id.clone());
+                .iter()
+                .find(|n| n.score <= params.dedup_max_distance && n.memory.kind == candidate.kind)
+                .map(|n| n.memory.id.clone());
             let link_targets: Vec<String> = if duplicate_id.is_some() {
                 Vec::new()
             } else {
+                // `extends` links go to neighbors beyond the dedup window but still
+                // moderately similar (matches the doc on `extends_max_distance`).
                 neighbors
                     .iter()
-                    .filter(|n| n.score <= params.extends_max_distance)
+                    .filter(|n| {
+                        n.score > params.dedup_max_distance
+                            && n.score <= params.extends_max_distance
+                    })
                     .take(params.max_links)
                     .map(|n| n.memory.id.clone())
                     .collect()
@@ -125,13 +181,12 @@ pub fn ingest_candidates(
             (duplicate_id, link_targets)
         };
 
-        if let Some(id) = duplicate_id {
-            store.reinforce(&id, params.reinforce_delta)?;
-            outcome.reinforced.push(id);
+        if let Some(dup) = duplicate_id {
+            store.reinforce(&dup, params.reinforce_delta)?;
+            outcome.reinforced.push(dup);
             continue;
         }
 
-        let id = content_id(container_tag, &candidate.content);
         let memory = candidate.into_memory(id.clone(), container_tag, embedding);
         store.upsert(&memory)?;
         // Link the new memory to its moderately-similar neighbors.
@@ -221,6 +276,37 @@ mod tests {
         assert_eq!(second.reinforced.len(), 1);
         assert_eq!(store.count(tag).unwrap(), 1);
         assert!(store.get(&first.added[0]).unwrap().unwrap().strength > 1.0);
+    }
+
+    #[test]
+    fn exact_reingest_reinforces_via_content_id_not_destructive_upsert() {
+        // Even with KNN dedup effectively disabled, re-ingesting identical content
+        // must reinforce the existing row (preserving/raising strength), never fall
+        // through to a destructive upsert that resets strength.
+        let extractor = HeuristicExtractor::default();
+        let embedder =
+            MapEmbedder::new(&[("I prefer dark mode in my editor", vec![1.0, 0.0, 0.0])]);
+        let mut store = SqliteStore::open_in_memory(3).unwrap();
+        let params = IngestParams {
+            dedup_max_distance: -1.0, // KNN near-dup branch can never trigger
+            ..IngestParams::default()
+        };
+        let tag = "t";
+        let text = "I prefer dark mode in my editor";
+
+        let first = ingest(&mut store, &embedder, &extractor, tag, text, &params).unwrap();
+        assert_eq!(first.added.len(), 1);
+        let strength_before = store.get(&first.added[0]).unwrap().unwrap().strength;
+
+        let second = ingest(&mut store, &embedder, &extractor, tag, text, &params).unwrap();
+        assert_eq!(second.added.len(), 0, "exact re-ingest must not insert");
+        assert_eq!(second.reinforced.len(), 1);
+        assert_eq!(store.count(tag).unwrap(), 1);
+        let strength_after = store.get(&first.added[0]).unwrap().unwrap().strength;
+        assert!(
+            strength_after > strength_before,
+            "strength must increase on re-ingest, not reset"
+        );
     }
 
     #[test]

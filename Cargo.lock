@@ -1754,6 +1754,7 @@ dependencies = [
 name = "memeora-proto"
 version = "0.0.0"
 dependencies = [
+ "interprocess",
  "serde",
  "serde_json",
 ]

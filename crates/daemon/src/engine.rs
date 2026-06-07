@@ -1,21 +1,119 @@
 //! The synchronous request handler behind the IPC protocol.
 //!
-//! [`Engine`] holds the storage, embedding, extraction, and profile-cache pieces
-//! and turns a [`Request`] into a [`Response`]. It is intentionally sync (rusqlite
-//! is sync): the daemon runs one `Engine` on a dedicated writer thread, with the
-//! tokio side forwarding requests to it over a channel.
+//! Work is split so the CPU-heavy, DB-free part (extraction + embedding) runs off
+//! the single writer thread:
+//! - [`Preparer`] turns a [`Request`] into a [`Prepared`] request — embedding the
+//!   query / candidates using a *shared* embedder + extractor. It runs on the
+//!   per-connection threads, so model inference parallelizes across clients.
+//! - [`Engine`] owns the store + profile cache and applies a [`Prepared`] request
+//!   to the DB. It is intentionally sync (rusqlite is sync) and runs alone on the
+//!   daemon's writer thread, so the DB stays single-writer.
+
+use std::sync::Arc;
 
 use memeora_core::{
-    Candidate, EmbeddingProvider, Extractor, IngestParams, Memory, MemoryKind, ProfileCache,
-    ScoredMemory, SearchParams, SqliteStore, VectorStore, ingest, ingest_candidates, search,
+    Candidate, EmbeddingProvider, Extractor, IngestParams, Memory, MemoryKind, PreparedCandidate,
+    ProfileCache, ScoredMemory, SearchParams, SqliteStore, VectorStore, embed_candidates,
+    ingest_prepared, search,
 };
 use memeora_proto::{MemoryDto, PROTOCOL_VERSION, Request, Response};
 
-/// Owns the engine and answers protocol requests.
+/// A request whose embedding/extraction has already been done, ready for the DB.
+///
+/// Built by [`Preparer::prepare`] off the writer thread; applied by
+/// [`Engine::handle_prepared`] on it.
+pub(crate) enum Prepared {
+    Hello,
+    Ingest {
+        scope: String,
+        candidates: Vec<PreparedCandidate>,
+    },
+    Add {
+        scope: String,
+        candidate: Candidate,
+        embedding: Vec<f32>,
+    },
+    Recall {
+        scope: String,
+        query: String,
+        query_embedding: Vec<f32>,
+        k: usize,
+    },
+    Context {
+        scope: String,
+    },
+    List {
+        scope: String,
+        limit: usize,
+    },
+    Forget {
+        id: String,
+    },
+}
+
+/// Turns a [`Request`] into a [`Prepared`] one by running extraction + embedding.
+///
+/// Cheaply cloneable (the embedder/extractor are shared `Arc`s) so each connection
+/// thread holds its own handle and inference happens in parallel, never on the
+/// writer thread.
+#[derive(Clone)]
+pub(crate) struct Preparer {
+    embedder: Arc<dyn EmbeddingProvider>,
+    extractor: Arc<dyn Extractor>,
+}
+
+impl Preparer {
+    /// Extract + embed as needed, producing a DB-ready [`Prepared`] request.
+    pub(crate) fn prepare(&self, request: Request) -> memeora_core::Result<Prepared> {
+        Ok(match request {
+            Request::Hello { .. } => Prepared::Hello,
+            Request::Ingest { scope, text } => {
+                let candidates = self.extractor.extract(&text)?;
+                let candidates = embed_candidates(self.embedder.as_ref(), candidates)?;
+                Prepared::Ingest { scope, candidates }
+            }
+            Request::Add {
+                scope,
+                content,
+                kind,
+            } => {
+                let candidate = Candidate {
+                    content,
+                    kind: MemoryKind::from_str_lossy(&kind),
+                    expires_at: None,
+                    confidence: 1.0,
+                };
+                let mut prepared = embed_candidates(self.embedder.as_ref(), vec![candidate])?;
+                let (candidate, embedding) = prepared
+                    .pop()
+                    .expect("one candidate embedded yields one prepared candidate");
+                Prepared::Add {
+                    scope,
+                    candidate,
+                    embedding,
+                }
+            }
+            Request::Recall { scope, query, k } => {
+                let query_embedding = self.embedder.embed_query(&query)?;
+                Prepared::Recall {
+                    scope,
+                    query,
+                    query_embedding,
+                    k,
+                }
+            }
+            Request::Context { scope } => Prepared::Context { scope },
+            Request::List { scope, limit } => Prepared::List { scope, limit },
+            Request::Forget { id } => Prepared::Forget { id },
+        })
+    }
+}
+
+/// Owns the store + profile cache and applies prepared requests to the DB.
 pub struct Engine {
     store: SqliteStore,
-    embedder: Box<dyn EmbeddingProvider>,
-    extractor: Box<dyn Extractor>,
+    embedder: Arc<dyn EmbeddingProvider>,
+    extractor: Arc<dyn Extractor>,
     profiles: ProfileCache,
     ingest_params: IngestParams,
     search_params: SearchParams,
@@ -30,17 +128,38 @@ impl Engine {
     ) -> Self {
         Engine {
             store,
-            embedder,
-            extractor,
+            embedder: Arc::from(embedder),
+            extractor: Arc::from(extractor),
             profiles: ProfileCache::with_defaults(),
             ingest_params: IngestParams::default(),
             search_params: SearchParams::default(),
         }
     }
 
-    /// Handle one request, converting any engine error into [`Response::Error`].
+    /// A [`Preparer`] sharing this engine's embedder + extractor, for use on the
+    /// connection threads (so embedding runs off the writer thread).
+    pub(crate) fn preparer(&self) -> Preparer {
+        Preparer {
+            embedder: Arc::clone(&self.embedder),
+            extractor: Arc::clone(&self.extractor),
+        }
+    }
+
+    /// Handle one request end-to-end (prepare + apply). Convenience for callers
+    /// that don't split the work across threads (tests, non-daemon embedders).
     pub fn handle(&mut self, request: Request) -> Response {
-        match self.dispatch(request) {
+        match self.preparer().prepare(request) {
+            Ok(prepared) => self.handle_prepared(prepared),
+            Err(err) => Response::Error {
+                message: err.to_string(),
+            },
+        }
+    }
+
+    /// Apply an already-prepared request to the DB, converting any engine error
+    /// into [`Response::Error`].
+    pub(crate) fn handle_prepared(&mut self, prepared: Prepared) -> Response {
+        match self.dispatch(prepared) {
             Ok(response) => response,
             Err(err) => Response::Error {
                 message: err.to_string(),
@@ -48,22 +167,16 @@ impl Engine {
         }
     }
 
-    fn dispatch(&mut self, request: Request) -> memeora_core::Result<Response> {
-        Ok(match request {
-            Request::Hello { .. } => Response::Hello {
+    fn dispatch(&mut self, prepared: Prepared) -> memeora_core::Result<Response> {
+        Ok(match prepared {
+            Prepared::Hello => Response::Hello {
                 protocol_version: PROTOCOL_VERSION,
                 server_version: env!("CARGO_PKG_VERSION").to_string(),
             },
 
-            Request::Ingest { scope, text } => {
-                let outcome = ingest(
-                    &mut self.store,
-                    self.embedder.as_ref(),
-                    self.extractor.as_ref(),
-                    &scope,
-                    &text,
-                    &self.ingest_params,
-                )?;
+            Prepared::Ingest { scope, candidates } => {
+                let outcome =
+                    ingest_prepared(&mut self.store, &scope, candidates, &self.ingest_params)?;
                 self.profiles.invalidate(&scope);
                 Response::Ingested {
                     added: outcome.added.len(),
@@ -71,37 +184,34 @@ impl Engine {
                 }
             }
 
-            Request::Add {
+            Prepared::Add {
                 scope,
-                content,
-                kind,
+                candidate,
+                embedding,
             } => {
-                let candidate = Candidate {
-                    content,
-                    kind: MemoryKind::from_str_lossy(&kind),
-                    expires_at: None,
-                    confidence: 1.0,
-                };
-                let outcome = ingest_candidates(
+                let outcome = ingest_prepared(
                     &mut self.store,
-                    self.embedder.as_ref(),
                     &scope,
-                    vec![candidate],
+                    vec![(candidate, embedding)],
                     &self.ingest_params,
                 )?;
                 self.profiles.invalidate(&scope);
-                // The single memory was either inserted or reinforced an existing one.
-                let id = outcome
-                    .added
-                    .into_iter()
-                    .chain(outcome.reinforced)
-                    .next()
-                    .unwrap_or_default();
-                Response::Added { id }
+                // The single memory was either inserted or reinforced an existing one;
+                // a missing id means it was dropped, which we surface rather than ack.
+                match outcome.added.into_iter().chain(outcome.reinforced).next() {
+                    Some(id) => Response::Added { id },
+                    None => Response::Error {
+                        message: "add stored no memory".to_string(),
+                    },
+                }
             }
 
-            Request::Recall { scope, query, k } => {
-                let query_embedding = self.embedder.embed_query(&query)?;
+            Prepared::Recall {
+                scope,
+                query,
+                query_embedding,
+                k,
+            } => {
                 let params = SearchParams {
                     k,
                     ..self.search_params.clone()
@@ -112,7 +222,7 @@ impl Engine {
                 }
             }
 
-            Request::Context { scope } => {
+            Prepared::Context { scope } => {
                 let profile = self.profiles.get_or_build(&self.store, &scope)?;
                 Response::Context {
                     statics: profile.statics.iter().map(memory_to_dto).collect(),
@@ -120,14 +230,14 @@ impl Engine {
                 }
             }
 
-            Request::List { scope, limit } => {
+            Prepared::List { scope, limit } => {
                 let memories = self.store.list_latest(&scope, limit)?;
                 Response::Memories {
                     memories: memories.iter().map(memory_to_dto).collect(),
                 }
             }
 
-            Request::Forget { id } => {
+            Prepared::Forget { id } => {
                 // Capture the scope before forgetting so we can invalidate its profile.
                 let scope = self.store.get(&id)?.map(|m| m.container_tag);
                 self.store.forget(&id)?;

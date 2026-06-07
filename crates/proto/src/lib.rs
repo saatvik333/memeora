@@ -6,12 +6,26 @@
 //! the wire format can stay stable while internals evolve. The daemon maps
 //! between the two.
 
+use interprocess::local_socket::{GenericFilePath, GenericNamespaced, Name, prelude::*};
 use serde::{Deserialize, Serialize};
 
 pub mod frame;
 
 /// Wire protocol version. Bumped on breaking changes to the IPC contract.
 pub const PROTOCOL_VERSION: u32 = 1;
+
+/// Build a local-socket [`Name`] from a string: a value containing a path
+/// separator is a filesystem socket path; otherwise a namespaced name.
+///
+/// Shared by the daemon (listener) and every client (SDK, hook, CLI, MCP) so both
+/// ends resolve the same socket string to the same endpoint — no drift.
+pub fn build_name(socket: &str) -> std::io::Result<Name<'_>> {
+    if socket.contains('/') || socket.contains('\\') {
+        socket.to_fs_name::<GenericFilePath>()
+    } else {
+        socket.to_ns_name::<GenericNamespaced>()
+    }
+}
 
 /// Default local-socket name the daemon listens on and clients connect to.
 /// A bare name (no path separator) is treated as a namespaced socket

@@ -33,6 +33,38 @@ impl SqliteStore {
     }
 
     fn init(conn: Connection, dim: usize) -> Result<Self> {
+        // Persist the embedding dim so reopening with a different model (which would
+        // silently leave the old-dimension vec0 table in place) is caught loudly.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+            [],
+        )?;
+        let stored_dim: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'embedding_dim'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match stored_dim {
+            Some(s) => {
+                let prev: usize = s.parse().unwrap_or(0);
+                if prev != dim {
+                    // Reusing DimMismatch: the store was built for `prev`, opened for `dim`.
+                    return Err(Error::DimMismatch {
+                        expected: prev,
+                        got: dim,
+                    });
+                }
+            }
+            None => {
+                conn.execute(
+                    "INSERT INTO meta (key, value) VALUES ('embedding_dim', ?1)",
+                    params![dim.to_string()],
+                )?;
+            }
+        }
+
         // The vec0 table is dimensionality-dependent, so it is created here rather than
         // in the static migrations. `container_tag` is a metadata column for KNN filtering.
         conn.execute_batch(&format!(
@@ -44,6 +76,22 @@ impl SqliteStore {
         ))?;
         Ok(SqliteStore { conn, dim })
     }
+}
+
+/// Build a safe FTS5 `MATCH` expression from arbitrary user text.
+///
+/// FTS5 `MATCH` is a query language, so passing raw text (with `:`, `-`, `"`, `*`,
+/// `NEAR`, …) risks a syntax error that would fail the whole search. We extract
+/// alphanumeric tokens and quote each as a phrase (implicit AND), which can never
+/// be malformed. Returns `None` when there are no usable tokens.
+fn fts5_match(query: &str) -> Option<String> {
+    let tokens: Vec<String> = query
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        // Tokens are alphanumeric, so there are no quotes to escape.
+        .map(|t| format!("\"{t}\""))
+        .collect();
+    (!tokens.is_empty()).then(|| tokens.join(" "))
 }
 
 /// Serialize an f32 slice to the little-endian byte blob `vec0` expects.
@@ -85,49 +133,74 @@ impl VectorStore for SqliteStore {
             });
         }
         let tx = self.conn.transaction()?;
-        // Replace any prior row with this id across all three tables.
-        if let Some(rowid) = tx
+        let existing_rowid = tx
             .query_row(
                 "SELECT rowid FROM memories WHERE id = ?1",
                 params![memory.id],
                 |r| r.get::<_, i64>(0),
             )
-            .optional()?
-        {
+            .optional()?;
+
+        // When the id already exists, UPDATE the row in place rather than
+        // delete-then-insert: the `relationships` FK is `ON DELETE CASCADE`, so
+        // deleting the row would silently wipe this memory's graph edges.
+        let rowid = if let Some(rowid) = existing_rowid {
+            tx.execute(
+                "UPDATE memories SET
+                    content = ?2, kind = ?3, container_tag = ?4, is_latest = ?5,
+                    strength = ?6, created_at = ?7, last_accessed_at = ?8,
+                    expires_at = ?9, metadata = ?10
+                 WHERE id = ?1",
+                params![
+                    memory.id,
+                    memory.content,
+                    memory.kind.as_str(),
+                    memory.container_tag,
+                    memory.is_latest as i64,
+                    memory.strength as f64,
+                    memory.created_at,
+                    memory.last_accessed_at,
+                    memory.expires_at,
+                    memory.metadata,
+                ],
+            )?;
+            // Refresh the vec row in place (same rowid; vec0 has no inbound FKs).
             tx.execute(
                 "DELETE FROM vec_memories WHERE memory_rowid = ?1",
                 params![rowid],
             )?;
-        }
-        tx.execute(
-            "DELETE FROM fts_memories WHERE memory_id = ?1",
-            params![memory.id],
-        )?;
-        tx.execute("DELETE FROM memories WHERE id = ?1", params![memory.id])?;
+            rowid
+        } else {
+            tx.execute(
+                "INSERT INTO memories
+                    (id, content, kind, container_tag, is_latest, strength,
+                     created_at, last_accessed_at, expires_at, metadata)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    memory.id,
+                    memory.content,
+                    memory.kind.as_str(),
+                    memory.container_tag,
+                    memory.is_latest as i64,
+                    memory.strength as f64,
+                    memory.created_at,
+                    memory.last_accessed_at,
+                    memory.expires_at,
+                    memory.metadata,
+                ],
+            )?;
+            tx.last_insert_rowid()
+        };
 
-        tx.execute(
-            "INSERT INTO memories
-                (id, content, kind, container_tag, is_latest, strength,
-                 created_at, last_accessed_at, expires_at, metadata)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params![
-                memory.id,
-                memory.content,
-                memory.kind.as_str(),
-                memory.container_tag,
-                memory.is_latest as i64,
-                memory.strength as f64,
-                memory.created_at,
-                memory.last_accessed_at,
-                memory.expires_at,
-                memory.metadata,
-            ],
-        )?;
-        let rowid = tx.last_insert_rowid();
         tx.execute(
             "INSERT INTO vec_memories (memory_rowid, embedding, container_tag)
              VALUES (?1, ?2, ?3)",
             params![rowid, vec_blob(&memory.embedding), memory.container_tag],
+        )?;
+        // FTS row has no inbound FK; replace it to reflect updated content.
+        tx.execute(
+            "DELETE FROM fts_memories WHERE memory_id = ?1",
+            params![memory.id],
         )?;
         tx.execute(
             "INSERT INTO fts_memories (memory_id, content) VALUES (?1, ?2)",
@@ -169,6 +242,10 @@ impl VectorStore for SqliteStore {
     }
 
     fn text_search(&self, container_tag: &str, query: &str, k: usize) -> Result<Vec<ScoredMemory>> {
+        // Sanitize arbitrary user text into a valid FTS5 MATCH; no tokens → no hits.
+        let Some(match_query) = fts5_match(query) else {
+            return Ok(Vec::new());
+        };
         let sql = format!(
             "SELECT {MEMORY_COLS}, bm25(fts_memories) AS distance
              FROM fts_memories f JOIN memories m ON m.id = f.memory_id
@@ -177,7 +254,7 @@ impl VectorStore for SqliteStore {
              LIMIT ?3"
         );
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(params![query, container_tag, k as i64], |row| {
+        let rows = stmt.query_map(params![match_query, container_tag, k as i64], |row| {
             Ok(ScoredMemory {
                 memory: row_to_memory(row)?,
                 score: row.get::<_, f64>("distance")? as f32,
@@ -253,10 +330,28 @@ impl VectorStore for SqliteStore {
     }
 
     fn forget(&mut self, id: &str) -> Result<()> {
-        self.conn.execute(
+        let tx = self.conn.transaction()?;
+        // Remove the vector so a forgotten memory can't occupy a KNN top-k slot
+        // (vec0 applies its `k` limit before the outer `is_latest` filter). The row
+        // is kept (is_latest = 0) so `get` still resolves it and the edges survive.
+        if let Some(rowid) = tx
+            .query_row(
+                "SELECT rowid FROM memories WHERE id = ?1",
+                params![id],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?
+        {
+            tx.execute(
+                "DELETE FROM vec_memories WHERE memory_rowid = ?1",
+                params![rowid],
+            )?;
+        }
+        tx.execute(
             "UPDATE memories SET is_latest = 0 WHERE id = ?1",
             params![id],
         )?;
+        tx.commit()?;
         Ok(())
     }
 }
@@ -409,5 +504,90 @@ mod tests {
         assert_eq!(latest.len(), 2);
         assert_eq!(latest[0].id, "b");
         assert_eq!(latest[1].id, "a");
+    }
+
+    #[test]
+    fn upsert_update_preserves_graph_edges() {
+        // Re-upserting an existing node must NOT cascade-delete its relationships.
+        let mut s = SqliteStore::open_in_memory(2).unwrap();
+        s.upsert(&mem("a", "a", "t", vec![1.0, 0.0])).unwrap();
+        s.upsert(&mem("b", "b", "t", vec![0.0, 1.0])).unwrap();
+        s.add_edge("a", "b", EdgeKind::Extends).unwrap();
+
+        // Update both endpoints' content + embedding.
+        s.upsert(&mem("a", "a-updated", "t", vec![0.5, 0.5]))
+            .unwrap();
+        s.upsert(&mem("b", "b-updated", "t", vec![0.2, 0.8]))
+            .unwrap();
+
+        let edges = s.edges_from("a").unwrap();
+        assert_eq!(edges.len(), 1, "edge must survive upsert of its endpoints");
+        assert_eq!(edges[0].to_id, "b");
+        assert_eq!(s.get("a").unwrap().unwrap().content, "a-updated");
+    }
+
+    #[test]
+    fn forget_does_not_starve_knn_top_k() {
+        // The forgotten (nearest) memory must not occupy a KNN slot and crowd out a
+        // still-latest neighbor.
+        let mut s = SqliteStore::open_in_memory(2).unwrap();
+        let tag = "t";
+        s.upsert(&mem("near", "near", tag, vec![1.0, 0.0])).unwrap();
+        s.upsert(&mem("mid", "mid", tag, vec![0.8, 0.2])).unwrap();
+        s.forget("near").unwrap();
+
+        // k = 1 against the query closest to the forgotten "near" still returns "mid".
+        let hits = s.knn(tag, &[1.0, 0.0], 1).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].memory.id, "mid");
+    }
+
+    #[test]
+    fn text_search_tolerates_fts5_operators() {
+        let mut s = SqliteStore::open_in_memory(2).unwrap();
+        let tag = "t";
+        s.upsert(&mem(
+            "m1",
+            "the user prefers rust over python",
+            tag,
+            vec![1.0, 0.0],
+        ))
+        .unwrap();
+        // Queries that are invalid raw FTS5 (colon, leading dash, stray quote) must
+        // not error; they sanitize to token phrases.
+        assert_eq!(s.text_search(tag, "rust: -python", 5).unwrap().len(), 1);
+        assert_eq!(s.text_search(tag, "\"rust", 5).unwrap().len(), 1);
+        // No usable tokens → empty, not an error.
+        assert!(s.text_search(tag, "   :-\"  ", 5).unwrap().is_empty());
+        assert!(s.text_search(tag, "", 5).unwrap().is_empty());
+    }
+
+    #[test]
+    fn reopening_with_a_different_dim_is_rejected() {
+        let mut path = std::env::temp_dir();
+        path.push("memeora-dim-reopen-test.db");
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+
+        {
+            let mut s = SqliteStore::open(&path, 3).unwrap();
+            s.upsert(&mem("m1", "x", "t", vec![1.0, 0.0, 0.0])).unwrap();
+        }
+        // Reopening with the same dim is fine.
+        assert!(SqliteStore::open(&path, 3).is_ok());
+        // Reopening with a different dim is a loud error, not silent corruption.
+        // (`SqliteStore` isn't `Debug`, so match the Result rather than `unwrap_err`.)
+        assert!(matches!(
+            SqliteStore::open(&path, 5),
+            Err(Error::DimMismatch {
+                expected: 3,
+                got: 5
+            })
+        ));
+
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
     }
 }
