@@ -20,6 +20,24 @@
   let live = $state(false);
   let error = $state<string | null>(null);
 
+  // Theme: initialized from <html data-theme> (set pre-paint in index.html), then
+  // toggled + persisted here. `dark` drives the graph's colors reactively.
+  let theme = $state<"light" | "dark">(
+    document.documentElement.dataset.theme === "dark" ? "dark" : "light",
+  );
+  let dark = $derived(theme === "dark");
+  $effect(() => {
+    document.documentElement.dataset.theme = theme;
+    try {
+      localStorage.setItem("memeora-theme", theme);
+    } catch {
+      /* storage may be unavailable (private mode) — non-fatal */
+    }
+  });
+  function toggleTheme() {
+    theme = theme === "dark" ? "light" : "dark";
+  }
+
   // Resolve the selected node from the (capped) graph first, then fall back to a
   // search result — a hit can live outside the 2000-node graph window, and without
   // this fallback clicking it would silently open nothing. Search `Mem`s lack
@@ -98,6 +116,14 @@
     <h1>
       memeora
       <span class="live" class:on={live} title={live ? "live" : "idle"}>●</span>
+      <button
+        class="theme-toggle"
+        onclick={toggleTheme}
+        title={dark ? "Switch to light mode" : "Switch to dark mode"}
+        aria-label="Toggle dark mode"
+      >
+        {dark ? "☀" : "☾"}
+      </button>
     </h1>
 
     <input
@@ -149,7 +175,7 @@
   <main class="canvas">
     {#if graph.nodes.length}
       {#key graph.scope}
-        <GraphView data={graph} onselect={(id) => (selectedId = id)} />
+        <GraphView data={graph} {dark} onselect={(id) => (selectedId = id)} />
       {/key}
     {:else}
       <div class="empty">No memories in this space yet.</div>

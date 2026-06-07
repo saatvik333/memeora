@@ -6,9 +6,43 @@
   --text: #222;
   --muted: #888;
   --accent: #4c6ef5;
+  --hover: #efefef;
+  --active-bg: #e7ecff;
+  --ok: #37b24d;
+  --danger: #e03131;
+  --danger-bg: #fff5f5;
+  --danger-bg-hover: #ffe3e3;
+  --danger-border: #ffc9c9;
+  --dim: #adb5bd; /* superseded badge */
+  --edge: #d0d0d0; /* graph edges */
+  --node-dim: #d4d4d4; /* superseded/forgotten nodes */
+  color-scheme: light;
   font-family: system-ui, -apple-system, sans-serif;
   font-size: 14px;
   color: var(--text);
+}
+
+/* Dark theme — only the palette changes; layout is shared. The resolved theme is
+   set on <html data-theme> by an inline script in index.html (so the OS preference
+   applies with no flash) and toggled at runtime from the sidebar. */
+:root[data-theme="dark"] {
+  --bg: #15171a;
+  --panel: #1b1e22;
+  --border: #2c3036;
+  --text: #e6e6e6;
+  --muted: #868d95;
+  --accent: #5c7cfa;
+  --hover: #23272d;
+  --active-bg: #243049;
+  --ok: #51cf66;
+  --danger: #ff6b6b;
+  --danger-bg: #2a1a1c;
+  --danger-bg-hover: #3a2024;
+  --danger-border: #5c2b2f;
+  --dim: #5c636a;
+  --edge: #3a3f46;
+  --node-dim: #3a3f46;
+  color-scheme: dark;
 }
 
 * {
@@ -17,6 +51,7 @@
 
 body {
   margin: 0;
+  background: var(--bg);
 }
 
 .app {
@@ -42,6 +77,9 @@ body {
 .sidebar h1 {
   font-size: 1.1rem;
   margin: 0.2rem 0 0.4rem;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
 }
 
 .sidebar h2 {
@@ -58,7 +96,27 @@ body {
   vertical-align: middle;
 }
 .live.on {
-  color: #37b24d;
+  color: var(--ok);
+}
+
+/* Dark-mode toggle — a plain icon button, right-aligned in the header. */
+.theme-toggle {
+  margin-left: auto;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--muted);
+  border-radius: 6px;
+  width: 1.7rem;
+  height: 1.7rem;
+  font-size: 0.95rem;
+  line-height: 1;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+}
+.theme-toggle:hover {
+  color: var(--text);
+  background: var(--hover);
 }
 
 .search {
@@ -97,10 +155,10 @@ body {
 }
 .scopes li button:hover,
 .results li button:hover {
-  background: #efefef;
+  background: var(--hover);
 }
 .scopes li.active button {
-  background: #e7ecff;
+  background: var(--active-bg);
   font-weight: 600;
 }
 .scopes li button em {
@@ -133,7 +191,7 @@ body {
   color: var(--muted);
 }
 .error {
-  color: #e03131;
+  color: var(--danger);
   font-size: 0.8rem;
   word-break: break-word;
 }
@@ -196,7 +254,7 @@ body {
   letter-spacing: 0.04em;
 }
 .kind.muted {
-  background: #adb5bd !important;
+  background: var(--dim) !important;
 }
 .inspector .content {
   font-size: 0.95rem;
@@ -222,13 +280,13 @@ body {
 .forget {
   width: 100%;
   padding: 0.5rem;
-  border: 1px solid #ffc9c9;
-  background: #fff5f5;
-  color: #e03131;
+  border: 1px solid var(--danger-border);
+  background: var(--danger-bg);
+  color: var(--danger);
   border-radius: 6px;
   cursor: pointer;
   font: inherit;
 }
 .forget:hover {
-  background: #ffe3e3;
+  background: var(--danger-bg-hover);
 }

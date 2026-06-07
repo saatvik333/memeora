@@ -4,6 +4,21 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>memeora</title>
+    <script>
+      // Resolve the theme before first paint (no flash): a stored choice wins,
+      // otherwise follow the OS preference. The app toggles + persists at runtime.
+      (function () {
+        try {
+          var t = localStorage.getItem("memeora-theme");
+          if (t !== "light" && t !== "dark") {
+            t = matchMedia("(prefers-color-scheme: dark)").matches
+              ? "dark"
+              : "light";
+          }
+          document.documentElement.dataset.theme = t;
+        } catch (e) {}
+      })();
+    </script>
   </head>
   <body>
     <div id="app"></div>
