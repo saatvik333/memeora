@@ -17,6 +17,18 @@ use memeora_core::{
     ingest_prepared, search,
 };
 use memeora_proto::{MemoryDto, PROTOCOL_VERSION, Request, Response};
+use tokio::sync::broadcast;
+
+/// A notification that a scope's memories changed, broadcast to the dashboard's
+/// live (SSE) stream so connected browsers can refresh. Carries only the scope and
+/// the kind of change — never memory content — so it stays cheap and leak-free.
+#[derive(Clone, Debug)]
+pub struct ChangeEvent {
+    /// The container tag whose memories changed.
+    pub scope: String,
+    /// What happened: `"ingested"`, `"added"`, or `"forgotten"`.
+    pub op: &'static str,
+}
 
 /// A request whose embedding/extraction has already been done, ready for the DB.
 ///
@@ -117,6 +129,9 @@ pub struct Engine {
     profiles: ProfileCache,
     ingest_params: IngestParams,
     search_params: SearchParams,
+    /// Optional sink for [`ChangeEvent`]s, set by the daemon when the dashboard is
+    /// enabled. `send` is best-effort: an error just means no live listeners.
+    events: Option<broadcast::Sender<ChangeEvent>>,
 }
 
 impl Engine {
@@ -133,6 +148,25 @@ impl Engine {
             profiles: ProfileCache::with_defaults(),
             ingest_params: IngestParams::default(),
             search_params: SearchParams::default(),
+            events: None,
+        }
+    }
+
+    /// Attach a [`ChangeEvent`] sink so mutations are broadcast to the dashboard's
+    /// live stream. Without this, change events are simply not emitted.
+    pub fn with_events(mut self, events: broadcast::Sender<ChangeEvent>) -> Self {
+        self.events = Some(events);
+        self
+    }
+
+    /// Best-effort broadcast of a change in `scope`. A send error means there are
+    /// no live subscribers, which is fine — it is never fatal to a write.
+    fn emit(&self, scope: &str, op: &'static str) {
+        if let Some(tx) = &self.events {
+            let _ = tx.send(ChangeEvent {
+                scope: scope.to_string(),
+                op,
+            });
         }
     }
 
@@ -178,6 +212,7 @@ impl Engine {
                 let outcome =
                     ingest_prepared(&mut self.store, &scope, candidates, &self.ingest_params)?;
                 self.profiles.invalidate(&scope);
+                self.emit(&scope, "ingested");
                 Response::Ingested {
                     added: outcome.added.len(),
                     reinforced: outcome.reinforced.len(),
@@ -196,6 +231,7 @@ impl Engine {
                     &self.ingest_params,
                 )?;
                 self.profiles.invalidate(&scope);
+                self.emit(&scope, "added");
                 // The single memory was either inserted or reinforced an existing one;
                 // a missing id means it was dropped, which we surface rather than ack.
                 match outcome.added.into_iter().chain(outcome.reinforced).next() {
@@ -243,6 +279,7 @@ impl Engine {
                 self.store.forget(&id)?;
                 if let Some(scope) = scope {
                     self.profiles.invalidate(&scope);
+                    self.emit(&scope, "forgotten");
                 }
                 Response::Forgotten
             }
@@ -379,6 +416,35 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn mutations_emit_change_events() {
+        let (tx, mut rx) = broadcast::channel(16);
+        let mut e = engine(&[("I prefer dark mode", vec![1.0, 0.0, 0.0])]).with_events(tx);
+        let scope = "s";
+
+        let id = match e.handle(Request::Add {
+            scope: scope.into(),
+            content: "I prefer dark mode".into(),
+            kind: "preference".into(),
+        }) {
+            Response::Added { id } => id,
+            other => panic!("unexpected: {other:?}"),
+        };
+        let ev = rx.try_recv().expect("add should emit an event");
+        assert_eq!((ev.scope.as_str(), ev.op), (scope, "added"));
+
+        e.handle(Request::Forget { id });
+        let ev = rx.try_recv().expect("forget should emit an event");
+        assert_eq!((ev.scope.as_str(), ev.op), (scope, "forgotten"));
+
+        // A pure read (List) must NOT emit a change event.
+        e.handle(Request::List {
+            scope: scope.into(),
+            limit: 10,
+        });
+        assert!(rx.try_recv().is_err(), "reads must not emit events");
     }
 
     #[test]

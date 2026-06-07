@@ -6,8 +6,8 @@ memeora gives your AI coding tools **persistent memory** — it learns facts fro
 builds a knowledge graph, and recalls the right context at the right time. It's a free,
 **local-first**, open alternative to hosted memory APIs: **no required LLM, no API key, works offline.**
 
-> **Status:** Steps 1–7 implemented — the engine, its surfaces, and per-tool
-> packaging are end-to-end:
+> **Status:** Steps 1–8 implemented — the engine, its surfaces, per-tool
+> packaging, and the local dashboard are end-to-end:
 > - **Engine (`crates/core`):** SQLite + statically-linked `sqlite-vec` KNN + FTS5 behind the
 >   `VectorStore` trait (container-tag scoping, soft-forget); `EmbeddingProvider` with a
 >   content-hash cache and a local `fastembed` backend; hybrid retrieval (dense + BM25 fused
@@ -25,8 +25,13 @@ builds a knowledge graph, and recalls the right context at the right time. It's 
 >   (plugin marketplace), **Codex** (`config.toml` + hooks), **Antigravity** (plugin bundle, own
 >   camelCase schema), and **OpenCode** (thin TS shim — the only non-Rust adapter). All four
 >   share one daemon/DB, so memory is cross-tool by construction.
+> - **Dashboard ([`dashboard/`](dashboard/)):** a local graph UI served *by the daemon* — an
+>   `axum` JSON API + SSE live stream + an embedded **Svelte 5 + Sigma.js** (WebGL) graph,
+>   on `127.0.0.1` only. Sole-writer stays intact: reads use a second read-only SQLite
+>   connection, while `search`/`forget` route back through the daemon's own IPC. Open it with
+>   `memeora dashboard`.
 >
-> Next: dashboard, ecosystem, release. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+> Next: ecosystem, release. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## Highlights
 - **Rust** engine + daemon + MCP server + hook binary + CLI → one self-contained distributable.
@@ -43,10 +48,11 @@ builds a knowledge graph, and recalls the right context at the right time. It's 
 | `crates/core` | engine: storage, embeddings, extraction, graph, hybrid search, profiles |
 | `crates/proto` | versioned IPC contract (public) |
 | `crates/client` | Rust client SDK |
-| `crates/daemon` | blocking writer-actor daemon: holds models + DB, sole writer; embeds off the writer thread |
+| `crates/daemon` | blocking writer-actor daemon: holds models + DB, sole writer; embeds off the writer thread; serves the dashboard (axum + SSE) |
 | `crates/mcp` | `rmcp` MCP server (recall / remember / context / list) |
 | `crates/hook` | `memeora-hook` multi-host command-hook binary |
-| `crates/cli` | `memeora` CLI (doctor / add / ingest / recall / context / list / forget / scope) |
+| `crates/cli` | `memeora` CLI (doctor / add / ingest / recall / context / list / forget / scope / dashboard) |
+| `dashboard/` | Svelte 5 + Vite + Sigma.js graph UI, embedded into the daemon via `rust-embed` |
 
 ## Build
 ```sh

@@ -5,8 +5,9 @@
 //! ([`main`](../main.rs)) wraps it in the tokio runtime, the single-writer thread,
 //! and the IPC transport (added in later steps; see `docs/ARCHITECTURE.md`).
 
+pub mod dashboard;
 pub mod engine;
 pub mod server;
 
-pub use engine::Engine;
+pub use engine::{ChangeEvent, Engine};
 pub use server::serve;

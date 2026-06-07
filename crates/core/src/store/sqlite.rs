@@ -7,7 +7,8 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use crate::db;
 use crate::error::{Error, Result};
 use crate::store::{
-    EdgeKind, Memory, MemoryKind, Relationship, ScoredMemory, VectorStore, now_unix,
+    EdgeKind, GraphData, Memory, MemoryKind, Relationship, ScopeInfo, ScoredMemory, VectorStore,
+    now_unix,
 };
 
 /// SQLite store. Owns one connection (the daemon keeps a single writer; see ARCHITECTURE.md).
@@ -75,6 +76,79 @@ impl SqliteStore {
             );"
         ))?;
         Ok(SqliteStore { conn, dim })
+    }
+
+    /// List every scope that holds memories, with its latest and total counts.
+    ///
+    /// Read-only and not part of [`VectorStore`]: it powers the dashboard's spaces
+    /// switcher (a whole-DB scan across container tags), which the scoped trait
+    /// methods deliberately don't expose.
+    pub fn list_scopes(&self) -> Result<Vec<ScopeInfo>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT container_tag,
+                    COALESCE(SUM(is_latest), 0) AS latest,
+                    COUNT(*) AS total
+             FROM memories
+             GROUP BY container_tag
+             ORDER BY latest DESC, total DESC, container_tag",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(ScopeInfo {
+                tag: row.get("container_tag")?,
+                latest: row.get::<_, i64>("latest")? as usize,
+                total: row.get::<_, i64>("total")? as usize,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    /// Fetch a scope's graph for visualization: up to `cap` nodes (all versions,
+    /// newest first, *including* soft-forgotten ones so the UI can dim them) plus
+    /// the edges whose endpoints are both among the returned nodes.
+    ///
+    /// Read-only and not part of [`VectorStore`]: unlike [`list_latest`], this
+    /// intentionally returns non-latest memories so the graph shows version history.
+    ///
+    /// [`list_latest`]: VectorStore::list_latest
+    pub fn graph(&self, container_tag: &str, cap: usize) -> Result<GraphData> {
+        let node_sql = format!(
+            "SELECT {MEMORY_COLS} FROM memories m
+             WHERE m.container_tag = ?1
+             ORDER BY m.created_at DESC, m.rowid DESC
+             LIMIT ?2"
+        );
+        let mut stmt = self.conn.prepare(&node_sql)?;
+        let nodes: Vec<Memory> = stmt
+            .query_map(params![container_tag, cap as i64], row_to_memory)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        // Only keep edges whose endpoints both survived the node cap, so the UI
+        // never references a missing node.
+        let ids: std::collections::HashSet<&str> = nodes.iter().map(|m| m.id.as_str()).collect();
+        let mut edge_stmt = self.conn.prepare(
+            "SELECT r.from_id, r.to_id, r.kind, r.created_at
+             FROM relationships r
+             JOIN memories mf ON mf.id = r.from_id
+             JOIN memories mt ON mt.id = r.to_id
+             WHERE mf.container_tag = ?1 AND mt.container_tag = ?1
+             ORDER BY r.created_at",
+        )?;
+        let edges: Vec<Relationship> = edge_stmt
+            .query_map(params![container_tag], |row| {
+                Ok(Relationship {
+                    from_id: row.get(0)?,
+                    to_id: row.get(1)?,
+                    kind: EdgeKind::from_str_lossy(&row.get::<_, String>(2)?),
+                    created_at: row.get(3)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
+            .filter(|e| ids.contains(e.from_id.as_str()) && ids.contains(e.to_id.as_str()))
+            .collect();
+
+        Ok(GraphData { nodes, edges })
     }
 }
 
@@ -560,6 +634,75 @@ mod tests {
         // No usable tokens → empty, not an error.
         assert!(s.text_search(tag, "   :-\"  ", 5).unwrap().is_empty());
         assert!(s.text_search(tag, "", 5).unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_scopes_reports_latest_and_total_counts() {
+        let mut s = SqliteStore::open_in_memory(2).unwrap();
+        s.upsert(&mem("a1", "a one", "tag_a", vec![1.0, 0.0]))
+            .unwrap();
+        s.upsert(&mem("a2", "a two", "tag_a", vec![0.0, 1.0]))
+            .unwrap();
+        s.upsert(&mem("b1", "b one", "tag_b", vec![1.0, 0.0]))
+            .unwrap();
+        // Forgetting keeps the row (total) but drops it from latest.
+        s.forget("a2").unwrap();
+
+        let scopes = s.list_scopes().unwrap();
+        assert_eq!(scopes.len(), 2);
+        // tag_a: 1 latest, 2 total; tag_b: 1 latest, 1 total. Ordered by latest desc,
+        // then total desc — so tag_a (more total) comes first.
+        let a = scopes.iter().find(|s| s.tag == "tag_a").unwrap();
+        assert_eq!((a.latest, a.total), (1, 2));
+        let b = scopes.iter().find(|s| s.tag == "tag_b").unwrap();
+        assert_eq!((b.latest, b.total), (1, 1));
+        assert_eq!(scopes[0].tag, "tag_a");
+    }
+
+    #[test]
+    fn graph_returns_all_versions_and_scoped_edges() {
+        let mut s = SqliteStore::open_in_memory(2).unwrap();
+        let tag = "t";
+        s.upsert(&mem("a", "a", tag, vec![1.0, 0.0])).unwrap();
+        s.upsert(&mem("b", "b", tag, vec![0.0, 1.0])).unwrap();
+        // A node in another scope, plus an edge that must NOT appear in `t`'s graph.
+        s.upsert(&mem("x", "x", "other", vec![1.0, 1.0])).unwrap();
+        s.add_edge("a", "b", EdgeKind::Extends).unwrap();
+        s.forget("b").unwrap(); // still a node (dimmed), not dropped
+
+        let g = s.graph(tag, 100).unwrap();
+        // Both nodes returned despite one being soft-forgotten.
+        assert_eq!(g.nodes.len(), 2);
+        assert!(g.nodes.iter().any(|m| m.id == "b" && !m.is_latest));
+        // The one in-scope edge is returned; cross-scope nodes/edges are excluded.
+        assert_eq!(g.edges.len(), 1);
+        assert_eq!(
+            (g.edges[0].from_id.as_str(), g.edges[0].to_id.as_str()),
+            ("a", "b")
+        );
+    }
+
+    #[test]
+    fn graph_drops_edges_to_capped_out_nodes() {
+        let mut s = SqliteStore::open_in_memory(2).unwrap();
+        let tag = "t";
+        // Three nodes with increasing created_at so the cap keeps the newest.
+        let mut a = mem("a", "a", tag, vec![1.0, 0.0]);
+        a.created_at = 100;
+        let mut b = mem("b", "b", tag, vec![0.0, 1.0]);
+        b.created_at = 200;
+        s.upsert(&a).unwrap();
+        s.upsert(&b).unwrap();
+        s.add_edge("b", "a", EdgeKind::Extends).unwrap();
+
+        // cap = 1 keeps only "b"; the b→a edge references a missing node and is dropped.
+        let g = s.graph(tag, 1).unwrap();
+        assert_eq!(g.nodes.len(), 1);
+        assert_eq!(g.nodes[0].id, "b");
+        assert!(
+            g.edges.is_empty(),
+            "edge to a capped-out node must be dropped"
+        );
     }
 
     #[test]

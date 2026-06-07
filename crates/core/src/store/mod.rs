@@ -151,6 +151,28 @@ impl EdgeKind {
     }
 }
 
+/// Summary of one scope/container, for the dashboard's spaces switcher.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopeInfo {
+    /// The container tag.
+    pub tag: String,
+    /// Current-version (`is_latest = 1`) memories in the scope.
+    pub latest: usize,
+    /// All memories in the scope, including superseded/forgotten ones.
+    pub total: usize,
+}
+
+/// A scope's full knowledge graph for visualization: every node (all versions,
+/// including soft-forgotten) plus the edges among them.
+#[derive(Debug, Clone, Default)]
+pub struct GraphData {
+    /// Memories in the scope (newest first). `is_latest = false` ones are dimmed
+    /// in the UI rather than hidden. Embeddings are not hydrated (see [`Memory`]).
+    pub nodes: Vec<Memory>,
+    /// Directed edges whose endpoints are both in `nodes`.
+    pub edges: Vec<Relationship>,
+}
+
 /// A directed edge `from_id --kind--> to_id` between two memories.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Relationship {

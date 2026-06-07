@@ -27,7 +27,10 @@ pub use ingest::{
 pub use profile::{Profile, ProfileCache, ProfileParams, build_profile};
 pub use search::{RerankHit, Reranker, SearchMode, SearchParams, rerank_memories, search};
 pub use store::sqlite::SqliteStore;
-pub use store::{Memory, MemoryKind, ScoredMemory, VectorStore, now_unix};
+pub use store::{
+    EdgeKind, GraphData, Memory, MemoryKind, Relationship, ScopeInfo, ScoredMemory, VectorStore,
+    now_unix,
+};
 
 /// Crate version, surfaced by the daemon's capability handshake.
 pub fn version() -> &'static str {

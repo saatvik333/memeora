@@ -1,0 +1,234 @@
+/* Deliberately minimal styling — function first; the graph is the centerpiece. */
+:root {
+  --bg: #ffffff;
+  --panel: #fafafa;
+  --border: #e6e6e6;
+  --text: #222;
+  --muted: #888;
+  --accent: #4c6ef5;
+  font-family: system-ui, -apple-system, sans-serif;
+  font-size: 14px;
+  color: var(--text);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+.app {
+  display: flex;
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+}
+
+/* Sidebar */
+.sidebar {
+  width: 250px;
+  flex: 0 0 250px;
+  border-right: 1px solid var(--border);
+  background: var(--panel);
+  padding: 0.75rem;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.sidebar h1 {
+  font-size: 1.1rem;
+  margin: 0.2rem 0 0.4rem;
+}
+
+.sidebar h2 {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  margin: 0.6rem 0 0.2rem;
+}
+
+.live {
+  color: var(--muted);
+  font-size: 0.7rem;
+  vertical-align: middle;
+}
+.live.on {
+  color: #37b24d;
+}
+
+.search {
+  width: 100%;
+  padding: 0.45rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font: inherit;
+}
+.search:focus {
+  outline: 2px solid var(--accent);
+  border-color: transparent;
+}
+
+.scopes,
+.results ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.scopes li button,
+.results li button {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: none;
+  font: inherit;
+  color: inherit;
+  padding: 0.35rem 0.4rem;
+  border-radius: 5px;
+  cursor: pointer;
+}
+.scopes li button:hover,
+.results li button:hover {
+  background: #efefef;
+}
+.scopes li.active button {
+  background: #e7ecff;
+  font-weight: 600;
+}
+.scopes li button em {
+  margin-left: auto;
+  font-style: normal;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+.scopes li button span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.results li button {
+  font-size: 0.85rem;
+  align-items: flex-start;
+}
+.results li button .dot,
+.lk {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-top: 0.35rem;
+  display: inline-block;
+}
+
+.muted {
+  color: var(--muted);
+}
+.error {
+  color: #e03131;
+  font-size: 0.8rem;
+  word-break: break-word;
+}
+
+.sidebar footer {
+  margin-top: auto;
+  font-size: 0.72rem;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  flex-wrap: wrap;
+}
+.sidebar footer .lk {
+  margin: 0 0.1rem 0 0.4rem;
+}
+
+/* Canvas */
+.canvas {
+  flex: 1;
+  position: relative;
+  background: var(--bg);
+}
+.empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+}
+
+/* Inspector */
+.inspector {
+  width: 300px;
+  flex: 0 0 300px;
+  border-left: 1px solid var(--border);
+  background: var(--panel);
+  padding: 1rem;
+  overflow-y: auto;
+  position: relative;
+}
+.inspector .close {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.6rem;
+  border: none;
+  background: none;
+  font-size: 1.3rem;
+  line-height: 1;
+  cursor: pointer;
+  color: var(--muted);
+}
+.kind {
+  display: inline-block;
+  color: #fff;
+  font-size: 0.7rem;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.kind.muted {
+  background: #adb5bd !important;
+}
+.inspector .content {
+  font-size: 0.95rem;
+  line-height: 1.45;
+  margin: 0.7rem 0;
+}
+.inspector dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.25rem 0.75rem;
+  font-size: 0.82rem;
+  margin: 0.5rem 0 1rem;
+}
+.inspector dt {
+  color: var(--muted);
+}
+.inspector dd {
+  margin: 0;
+}
+.mono {
+  font-family: ui-monospace, monospace;
+}
+.forget {
+  width: 100%;
+  padding: 0.5rem;
+  border: 1px solid #ffc9c9;
+  background: #fff5f5;
+  color: #e03131;
+  border-radius: 6px;
+  cursor: pointer;
+  font: inherit;
+}
+.forget:hover {
+  background: #ffe3e3;
+}

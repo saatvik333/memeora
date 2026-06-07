@@ -10,6 +10,9 @@ node_modules/
 dist/
 .svelte-kit/
 *.tsbuildinfo
+# dashboard is documented for pnpm; ignore other package managers' lockfiles
+bun.lock
+package-lock.json
 
 # memeora runtime data & models
 .memeora/
