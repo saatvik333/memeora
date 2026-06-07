@@ -11,12 +11,14 @@ pub mod container_tag;
 pub mod db;
 pub mod embed;
 mod error;
+pub mod extract;
 pub mod profile;
 pub mod search;
 pub mod store;
 
 pub use embed::{CachingEmbedder, EmbeddingProvider, EmbeddingSpace};
 pub use error::{Error, Result};
+pub use extract::{Candidate, Extractor, HeuristicExtractor};
 pub use profile::{Profile, ProfileCache, ProfileParams, build_profile};
 pub use search::{RerankHit, Reranker, SearchMode, SearchParams, rerank_memories, search};
 pub use store::sqlite::SqliteStore;
