@@ -23,6 +23,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 interprocess = "2"
 dirs = "6"
+clap = { version = "4", features = ["derive"] }
 
 [profile.release]
 lto = "thin"

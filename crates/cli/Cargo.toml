@@ -15,3 +15,4 @@ path = "src/main.rs"
 [dependencies]
 memeora-client.workspace = true
 memeora-proto.workspace = true
+clap.workspace = true
