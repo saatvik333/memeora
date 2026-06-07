@@ -9,12 +9,8 @@
   --border-strong: #d6d6d3;
   --text: #1c1c1c;
   --muted: #767676;
-  --accent: #5b5bd6;
-  --ring: rgba(91, 91, 214, 0.35);
-  --danger: #cf3b3b;
-  --ok: #2f9e44;
-  --edge: #e2e2e0;
-  --node-dim: #d6d6d3;
+  --accent: #33363b;
+  --ring: rgba(0, 0, 0, 0.22);
 
   color-scheme: light;
   font-family: system-ui, -apple-system, sans-serif;
@@ -31,12 +27,8 @@
   --border-strong: #34343a;
   --text: #ededed;
   --muted: #8a8a8f;
-  --accent: #7c7cf0;
-  --ring: rgba(124, 124, 240, 0.4);
-  --danger: #e5664d;
-  --ok: #51cf66;
-  --edge: #2a2a2e;
-  --node-dim: #34343a;
+  --accent: #ededed;
+  --ring: rgba(255, 255, 255, 0.3);
 
   color-scheme: dark;
 }
@@ -65,14 +57,18 @@ body {
   overflow: hidden;
 }
 
+/* The single sidebar lives on the right; the graph canvas fills the rest. */
 .sidebar {
-  width: 248px;
-  flex: 0 0 248px;
-  border-right: 1px solid var(--border);
+  width: 300px;
+  flex: 0 0 300px;
+  border-left: 1px solid var(--border);
   background: var(--panel);
   display: flex;
   flex-direction: column;
   min-height: 0;
+  /* Sit above the graph canvas (which is its own stacking context). */
+  position: relative;
+  z-index: 1;
 }
 
 .sidebar > * {
@@ -84,16 +80,8 @@ body {
   position: relative;
   background: var(--bg);
   min-width: 0;
-}
-
-.inspector {
-  width: 320px;
-  flex: 0 0 320px;
-  border-left: 1px solid var(--border);
-  background: var(--panel);
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
+  /* Clip the WebGL canvas to this column so it can't bleed over the panel. */
+  overflow: hidden;
 }
 
 /* ---- Header ---------------------------------------------------------------- */
@@ -120,7 +108,7 @@ body {
   flex: 0 0 auto;
 }
 .dot.on {
-  background: var(--ok);
+  background: var(--text);
 }
 
 .spacer {
@@ -160,10 +148,38 @@ body {
   font-size: 13px;
 }
 .error {
-  color: var(--danger);
+  color: var(--text);
   font-size: 12px;
   word-break: break-word;
   padding-block: 6px;
+}
+
+/* ---- Loading spinner ------------------------------------------------------- */
+
+.loading {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+}
+.searching {
+  display: grid;
+  place-items: center;
+  padding: 28px 0;
+}
+.spinner {
+  width: 22px;
+  height: 22px;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--text);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 /* ---- Native controls ------------------------------------------------------- */
@@ -215,13 +231,15 @@ body {
 .btn:hover {
   border-color: var(--border-strong);
 }
+/* Monochrome high-contrast button (inverts vs the surface) for the one
+   destructive action — stands out without colour. */
 .btn-danger {
   border-color: transparent;
-  background: var(--danger);
-  color: #fff;
+  background: var(--text);
+  color: var(--bg);
 }
 .btn-danger:hover {
-  filter: brightness(0.94);
+  opacity: 0.88;
 }
 
 /* A flat, full-row list button (results). */
@@ -242,13 +260,6 @@ body {
 .row:hover {
   background: var(--elevated);
 }
-.row .swatch {
-  flex: 0 0 auto;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  margin-top: 5px;
-}
 .row span {
   overflow: hidden;
   display: -webkit-box;
@@ -257,37 +268,13 @@ body {
   -webkit-box-orient: vertical;
 }
 
-/* ---- Legend ---------------------------------------------------------------- */
+/* ---- Selected memory ------------------------------------------------------- */
 
-.legend {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  height: 36px;
-  flex: 0 0 auto;
-  border-top: 1px solid var(--border);
-  color: var(--muted);
-  font-size: 11px;
-}
-.legend span {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-}
-.legend .swatch {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-}
-
-/* ---- Inspector ------------------------------------------------------------- */
-
-.inspector .pad {
-  padding: 14px 16px;
-}
 .kind {
   display: inline-block;
-  color: #fff;
+  background: var(--elevated);
+  border: 1px solid var(--border);
+  color: var(--muted);
   font-size: 10.5px;
   padding: 2px 8px;
   border-radius: 999px;
@@ -295,8 +282,7 @@ body {
   letter-spacing: 0.04em;
 }
 .kind.is-muted {
-  background: var(--border-strong) !important;
-  color: var(--text);
+  background: transparent;
 }
 .content {
   font-size: 14px;

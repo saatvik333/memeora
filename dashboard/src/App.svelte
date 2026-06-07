@@ -4,7 +4,6 @@
   import GraphView from "./Graph.svelte";
   import {
     api,
-    kindColor,
     relativeTime,
     shortenScope,
     type Scope,
@@ -19,8 +18,11 @@
   let query = $state("");
   let results = $state<Mem[]>([]);
   let searched = $state(false);
+  let searching = $state(false);
   let live = $state(false);
   let error = $state<string | null>(null);
+  let graphLoading = $state(false);
+  let forgotten = $state<string[]>([]);
 
   // Theme is set on <html data-theme> pre-paint (index.html); toggle + persist here.
   let theme = $state<"light" | "dark">(
@@ -39,7 +41,7 @@
 
   let currentLabel = $derived(current ? shortenScope(current) : "Select a space");
 
-  // Resolve the selected node from the (capped) graph first, then a search result.
+  // Resolve the selected node from the graph first, then a search result.
   let selected = $derived.by(() => {
     if (!selectedId) return null;
     const node = graph.nodes.find((n) => n.id === selectedId);
@@ -48,6 +50,14 @@
     if (hit) return { ...hit, is_latest: true, last_accessed_at: hit.created_at };
     return null;
   });
+  // A memory already forgotten (this session) or superseded can't be forgotten again.
+  let isForgotten = $derived(
+    !!selected && (forgotten.includes(selected.id) || !selected.is_latest),
+  );
+
+  // Stable callbacks so passing them to <GraphView> never rebuilds its layout.
+  const handleSelect = (id: string | null) => (selectedId = id);
+  const setLoading = (v: boolean) => (graphLoading = v);
 
   async function loadScopes() {
     try {
@@ -59,11 +69,14 @@
   }
 
   async function loadGraph(scope: string) {
+    graphLoading = true;
     try {
       graph = await api.graph(scope);
       error = null;
+      if (!graph.nodes.length) graphLoading = false; // no graph to lay out
     } catch (e) {
       error = String(e);
+      graphLoading = false;
     }
   }
 
@@ -74,6 +87,7 @@
     results = [];
     searched = false;
     query = "";
+    forgotten = [];
     loadGraph(tag);
   }
 
@@ -83,19 +97,25 @@
       searched = false;
       return;
     }
+    searching = true;
     try {
       results = await api.search(current, query);
       searched = true;
+      selectedId = null; // show results, not a lingering inspector
     } catch (e) {
       error = String(e);
+    } finally {
+      searching = false;
     }
   }
 
   async function forget(id: string) {
     try {
       await api.forget(id);
+      // Mark forgotten (dims it in the graph, hides the Forget button) without a
+      // full graph reload — the soft-forget is persisted server-side.
+      forgotten = [...forgotten, id];
       selectedId = null;
-      if (current) loadGraph(current);
     } catch (e) {
       error = String(e);
     }
@@ -137,6 +157,26 @@
 
 <Tooltip.Provider delayDuration={300}>
   <div class="app">
+    <main class="canvas">
+      {#if graph.nodes.length}
+        {#key graph.scope}
+          <GraphView
+            data={graph}
+            {dark}
+            selected={selectedId}
+            {forgotten}
+            onselect={handleSelect}
+            onloading={setLoading}
+          />
+        {/key}
+      {:else if !graphLoading}
+        <div class="empty">No memories in this space yet.</div>
+      {/if}
+      {#if graphLoading}
+        <div class="loading"><span class="spinner"></span></div>
+      {/if}
+    </main>
+
     <aside class="sidebar">
       <header class="brand">
         <span class="brand-name">memeora</span>
@@ -160,7 +200,6 @@
       <Separator.Root />
 
       <div class="section">
-        <p class="label">Space</p>
         <Select.Root
           type="single"
           value={current ?? ""}
@@ -202,21 +241,68 @@
       <div class="grow">
         <ScrollArea.Root>
           <ScrollArea.Viewport>
-            <div class="section">
-              {#if results.length}
-                <p class="label">Results</p>
-                {#each results as r (r.id)}
-                  <button class="row" onclick={() => (selectedId = r.id)}>
-                    <span class="swatch" style="background:{kindColor(r.kind)}"></span>
-                    <span>{r.content}</span>
-                  </button>
-                {/each}
-              {:else if searched}
-                <p class="muted">No matches.</p>
-              {:else}
-                <p class="muted">Type to search this space.</p>
-              {/if}
-            </div>
+            {#if selected}
+              <div class="section">
+                <span class="kind">{selected.kind}</span>
+                {#if isForgotten}
+                  <span class="kind is-muted">forgotten</span>
+                {/if}
+                <p class="content">{selected.content}</p>
+                <dl class="meta">
+                  <dt>strength</dt>
+                  <dd>{selected.strength.toFixed(2)}</dd>
+                  <dt>created</dt>
+                  <dd>{relativeTime(selected.created_at)}</dd>
+                  <dt>last seen</dt>
+                  <dd>{relativeTime(selected.last_accessed_at)}</dd>
+                  <dt>id</dt>
+                  <dd class="mono">{selected.id.slice(0, 16)}…</dd>
+                </dl>
+
+                {#if isForgotten}
+                  <p class="muted">Soft-forgotten — hidden from recall.</p>
+                {:else}
+                  <AlertDialog.Root>
+                    <AlertDialog.Trigger class="btn btn-danger">Forget</AlertDialog.Trigger>
+                    <AlertDialog.Portal>
+                      <AlertDialog.Overlay />
+                      <AlertDialog.Content>
+                        <AlertDialog.Title>Forget this memory?</AlertDialog.Title>
+                        <AlertDialog.Description>
+                          It's soft-forgotten (kept but hidden from recall), not deleted.
+                        </AlertDialog.Description>
+                        <div class="dialog-actions">
+                          <AlertDialog.Cancel class="btn">Cancel</AlertDialog.Cancel>
+                          <AlertDialog.Action
+                            class="btn btn-danger"
+                            onclick={() => selected && forget(selected.id)}
+                          >
+                            Forget
+                          </AlertDialog.Action>
+                        </div>
+                      </AlertDialog.Content>
+                    </AlertDialog.Portal>
+                  </AlertDialog.Root>
+                {/if}
+              </div>
+            {:else}
+              <div class="section">
+                {#if searching}
+                  <div class="searching"><span class="spinner"></span></div>
+                {:else if results.length}
+                  <p class="label">Results</p>
+                  {#each results as r (r.id)}
+                    <button class="row" onclick={() => (selectedId = r.id)}>
+                      <span>{r.content}</span>
+                    </button>
+                  {/each}
+                {:else if searched}
+                  <p class="muted">No matches.</p>
+                {:else}
+                  <p class="muted">Type to search this space.</p>
+                {/if}
+              </div>
+            {/if}
           </ScrollArea.Viewport>
           <ScrollArea.Scrollbar orientation="vertical">
             <ScrollArea.Thumb />
@@ -225,78 +311,6 @@
       </div>
 
       {#if error}<p class="error">{error}</p>{/if}
-
-      <footer class="legend">
-        <span><span class="swatch" style="background:{kindColor('fact')}"></span>fact</span>
-        <span><span class="swatch" style="background:{kindColor('preference')}"></span>pref</span>
-        <span><span class="swatch" style="background:{kindColor('episode')}"></span>episode</span>
-      </footer>
     </aside>
-
-    <main class="canvas">
-      {#if graph.nodes.length}
-        {#key graph.scope}
-          <GraphView data={graph} {dark} onselect={(id) => (selectedId = id)} />
-        {/key}
-      {:else}
-        <div class="empty">No memories in this space yet.</div>
-      {/if}
-    </main>
-
-    {#if selected}
-      <aside class="inspector">
-        <ScrollArea.Root>
-          <ScrollArea.Viewport>
-            <div class="pad">
-              <span class="kind" style="background:{kindColor(selected.kind)}">
-                {selected.kind}
-              </span>
-              {#if !selected.is_latest}
-                <span class="kind is-muted">superseded</span>
-              {/if}
-              <p class="content">{selected.content}</p>
-              <dl class="meta">
-                <dt>strength</dt>
-                <dd>{selected.strength.toFixed(2)}</dd>
-                <dt>created</dt>
-                <dd>{relativeTime(selected.created_at)}</dd>
-                <dt>last seen</dt>
-                <dd>{relativeTime(selected.last_accessed_at)}</dd>
-                <dt>id</dt>
-                <dd class="mono">{selected.id.slice(0, 16)}…</dd>
-              </dl>
-
-              <AlertDialog.Root>
-                <AlertDialog.Trigger class="btn btn-danger">
-                  Forget
-                </AlertDialog.Trigger>
-                <AlertDialog.Portal>
-                  <AlertDialog.Overlay />
-                  <AlertDialog.Content>
-                    <AlertDialog.Title>Forget this memory?</AlertDialog.Title>
-                    <AlertDialog.Description>
-                      It's soft-forgotten (kept but hidden from recall), not
-                      deleted.
-                    </AlertDialog.Description>
-                    <div class="dialog-actions">
-                      <AlertDialog.Cancel class="btn">Cancel</AlertDialog.Cancel>
-                      <AlertDialog.Action
-                        class="btn btn-danger"
-                        onclick={() => selected && forget(selected.id)}
-                      >
-                        Forget
-                      </AlertDialog.Action>
-                    </div>
-                  </AlertDialog.Content>
-                </AlertDialog.Portal>
-              </AlertDialog.Root>
-            </div>
-          </ScrollArea.Viewport>
-          <ScrollArea.Scrollbar orientation="vertical">
-            <ScrollArea.Thumb />
-          </ScrollArea.Scrollbar>
-        </ScrollArea.Root>
-      </aside>
-    {/if}
   </div>
 </Tooltip.Provider>

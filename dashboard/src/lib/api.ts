@@ -86,17 +86,6 @@ export const api = {
   },
 };
 
-const KIND_COLORS: Record<string, string> = {
-  fact: "#4c6ef5",
-  preference: "#f59f00",
-  episode: "#37b24d",
-};
-
-/** Node color by memory kind (gray fallback for unknown kinds). */
-export function kindColor(kind: string): string {
-  return KIND_COLORS[kind] ?? "#868e96";
-}
-
 /** A compact relative time like "3h ago" from a Unix-seconds timestamp. */
 export function relativeTime(unixSeconds: number): string {
   const secs = Math.max(0, Math.floor(Date.now() / 1000) - unixSeconds);
