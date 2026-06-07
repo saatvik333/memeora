@@ -11,8 +11,9 @@ builds a knowledge graph, and recalls the right context at the right time. It's 
 > a content-hash cache and a local `fastembed` backend; hybrid retrieval — dense + BM25 fused
 > with **RRF**, expiry filtering, and an optional cross-encoder reranker (opt-in ONNX behind
 > the `fastembed` feature); cached per-tag **profiles** (static facts/prefs + dynamic
-> episodes); and Tier-0 **extraction** — a model-free `Extractor` that classifies text into
-> fact/preference/episode candidates. Dedup/reinforce + graph edges next.
+> episodes); Tier-0 **extraction** — a model-free `Extractor` that classifies text into
+> fact/preference/episode candidates; and an **ingest** write path that embeds candidates and
+> reinforces near-duplicates instead of storing copies. Graph edges + daemon next.
 > See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## Highlights

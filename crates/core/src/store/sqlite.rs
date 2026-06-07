@@ -6,7 +6,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::db;
 use crate::error::{Error, Result};
-use crate::store::{Memory, MemoryKind, ScoredMemory, VectorStore};
+use crate::store::{Memory, MemoryKind, ScoredMemory, VectorStore, now_unix};
 
 /// SQLite store. Owns one connection (the daemon keeps a single writer; see ARCHITECTURE.md).
 pub struct SqliteStore {
@@ -214,6 +214,14 @@ impl VectorStore for SqliteStore {
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
     }
+
+    fn reinforce(&mut self, id: &str, delta: f32) -> Result<()> {
+        self.conn.execute(
+            "UPDATE memories SET strength = strength + ?1, last_accessed_at = ?2 WHERE id = ?3",
+            params![delta as f64, now_unix(), id],
+        )?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -303,5 +311,32 @@ mod tests {
     fn get_missing_returns_none() {
         let s = SqliteStore::open_in_memory(2).unwrap();
         assert!(s.get("nope").unwrap().is_none());
+    }
+
+    #[test]
+    fn reinforce_increases_strength() {
+        let mut s = SqliteStore::open_in_memory(2).unwrap();
+        s.upsert(&mem("m1", "x", "t", vec![1.0, 0.0])).unwrap();
+        assert_eq!(s.get("m1").unwrap().unwrap().strength, 1.0);
+        s.reinforce("m1", 0.5).unwrap();
+        assert_eq!(s.get("m1").unwrap().unwrap().strength, 1.5);
+        // Unknown id is a no-op, not an error.
+        s.reinforce("nope", 1.0).unwrap();
+    }
+
+    #[test]
+    fn list_latest_orders_newest_first() {
+        let mut s = SqliteStore::open_in_memory(2).unwrap();
+        let tag = "t";
+        let mut a = mem("a", "first", tag, vec![1.0, 0.0]);
+        a.created_at = 100;
+        let mut b = mem("b", "second", tag, vec![0.0, 1.0]);
+        b.created_at = 200;
+        s.upsert(&a).unwrap();
+        s.upsert(&b).unwrap();
+        let latest = s.list_latest(tag, 10).unwrap();
+        assert_eq!(latest.len(), 2);
+        assert_eq!(latest[0].id, "b");
+        assert_eq!(latest[1].id, "a");
     }
 }

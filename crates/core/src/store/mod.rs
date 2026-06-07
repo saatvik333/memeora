@@ -140,4 +140,8 @@ pub trait VectorStore {
     /// List the latest (current-version) memories in `container_tag`, newest
     /// first, up to `limit`. Embedding is not hydrated (see [`Memory`]).
     fn list_latest(&self, container_tag: &str, limit: usize) -> Result<Vec<Memory>>;
+
+    /// Reinforce a memory: add `delta` to its strength and set `last_accessed_at`
+    /// to now. A no-op if `id` is unknown.
+    fn reinforce(&mut self, id: &str, delta: f32) -> Result<()>;
 }
