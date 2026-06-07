@@ -28,6 +28,31 @@ impl SqliteStore {
         Self::init(db::open_in_memory()?, dim)
     }
 
+    /// Open an existing store as a **read-only** reader (no migrate, no table
+    /// creation, writes refused at the SQL layer). For the dashboard's second
+    /// connection so the daemon keeps a single writer. Validates the stored
+    /// embedding dim matches `dim` but never writes it.
+    pub fn open_readonly(path: impl AsRef<Path>, dim: usize) -> Result<Self> {
+        let conn = db::open_reader(path)?;
+        let stored_dim: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'embedding_dim'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(s) = stored_dim {
+            let prev: usize = s.parse().unwrap_or(0);
+            if prev != dim {
+                return Err(Error::DimMismatch {
+                    expected: prev,
+                    got: dim,
+                });
+            }
+        }
+        Ok(SqliteStore { conn, dim })
+    }
+
     /// Embedding dimensionality this store was created with.
     pub fn dim(&self) -> usize {
         self.dim
@@ -421,6 +446,10 @@ impl VectorStore for SqliteStore {
                 params![rowid],
             )?;
         }
+        // Drop the FTS row too, so a forgotten memory doesn't keep contributing to
+        // BM25 corpus stats (IDF/avgdl) and skew ranking of live results. `upsert`
+        // re-inserts it if the content is later resurrected.
+        tx.execute("DELETE FROM fts_memories WHERE memory_id = ?1", params![id])?;
         tx.execute(
             "UPDATE memories SET is_latest = 0 WHERE id = ?1",
             params![id],
@@ -703,6 +732,39 @@ mod tests {
             g.edges.is_empty(),
             "edge to a capped-out node must be dropped"
         );
+    }
+
+    #[test]
+    fn readonly_store_reads_but_refuses_writes() {
+        let mut path = std::env::temp_dir();
+        path.push("memeora-readonly-test.db");
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+        {
+            let mut s = SqliteStore::open(&path, 2).unwrap();
+            s.upsert(&mem("m1", "the user prefers tailwind", "t", vec![1.0, 0.0]))
+                .unwrap();
+        }
+        let reader = SqliteStore::open_readonly(&path, 2).unwrap();
+        // Reads work through the read-only connection.
+        assert_eq!(reader.count("t").unwrap(), 1);
+        assert_eq!(reader.list_latest("t", 5).unwrap().len(), 1);
+        assert_eq!(reader.list_scopes().unwrap().len(), 1);
+        // Writes are refused (query_only), so the dashboard connection can't write.
+        let mut reader = reader;
+        assert!(reader.upsert(&mem("m2", "x", "t", vec![0.0, 1.0])).is_err());
+        // A dim mismatch on reopen is caught without writing.
+        assert!(matches!(
+            SqliteStore::open_readonly(&path, 9),
+            Err(Error::DimMismatch {
+                expected: 2,
+                got: 9
+            })
+        ));
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
     }
 
     #[test]

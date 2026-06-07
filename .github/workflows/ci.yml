@@ -32,3 +32,29 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: EmbarkStudios/cargo-deny-action@v2
+
+  ts:
+    name: typescript (bun)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: sdk/ts (@memeora/client) — build + tests + proto parity
+        working-directory: sdk/ts
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+          bun test
+      - name: dashboard — type-check + build
+        working-directory: dashboard
+        run: |
+          bun install --frozen-lockfile
+          bun run check
+          bun run build
+      - name: opencode adapter — type-check
+        working-directory: adapters/opencode
+        run: |
+          bun install --frozen-lockfile
+          bun run check

@@ -44,4 +44,16 @@ else
     printf '      install: cargo install cargo-deny --locked\n'
 fi
 
+# TypeScript (bun) — mirrors the CI `ts` job. Skipped if bun isn't installed.
+if command -v bun >/dev/null 2>&1; then
+    step "sdk/ts — build + tests + proto parity"
+    (cd sdk/ts && bun install --frozen-lockfile && bun run build && bun test)
+    step "dashboard — type-check + build"
+    (cd dashboard && bun install --frozen-lockfile && bun run check && bun run build)
+    step "opencode adapter — type-check"
+    (cd adapters/opencode && bun install --frozen-lockfile && bun run check)
+else
+    printf '\n\033[33mskip:\033[0m bun not installed (CI still runs the TS job).\n'
+fi
+
 printf '\n\033[1;32mAll checks passed.\033[0m\n'

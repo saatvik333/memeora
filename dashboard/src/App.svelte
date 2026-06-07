@@ -20,7 +20,18 @@
   let live = $state(false);
   let error = $state<string | null>(null);
 
-  let selected = $derived(graph.nodes.find((n) => n.id === selectedId) ?? null);
+  // Resolve the selected node from the (capped) graph first, then fall back to a
+  // search result — a hit can live outside the 2000-node graph window, and without
+  // this fallback clicking it would silently open nothing. Search `Mem`s lack
+  // is_latest/last_accessed_at, so synthesize sensible defaults for the inspector.
+  let selected = $derived.by(() => {
+    if (!selectedId) return null;
+    const node = graph.nodes.find((n) => n.id === selectedId);
+    if (node) return node;
+    const hit = results.find((m) => m.id === selectedId);
+    if (hit) return { ...hit, is_latest: true, last_accessed_at: hit.created_at };
+    return null;
+  });
 
   async function loadScopes() {
     try {

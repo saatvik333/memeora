@@ -10,11 +10,15 @@
   },
   "keywords": ["opencode", "plugin", "memory", "memeora", "local-first"],
   "homepage": "https://github.com/saatvik333/memeora",
+  "scripts": {
+    "check": "tsc"
+  },
   "peerDependencies": {
-    "@opencode-ai/plugin": "*"
+    "@opencode-ai/plugin": "^1.16.2"
   },
   "devDependencies": {
-    "@opencode-ai/plugin": "latest",
-    "typescript": "^5"
+    "@opencode-ai/plugin": "^1.16.2",
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.3"
   }
 }

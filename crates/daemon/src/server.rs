@@ -4,9 +4,14 @@
 //! Why blocking threads rather than tokio: the [`Engine`] and its rusqlite store
 //! are synchronous, and [`memeora_proto::frame`] is sync `std::io`. A single
 //! writer thread owning the `Engine` is the natural "sole DB writer" and needs no
-//! locks; connection threads parse/frame in parallel and forward each request to
+//! locks; connection threads parse/frame off the writer and forward each request to
 //! the writer over a channel. This sidesteps blocking a tokio runtime with sync
 //! SQLite. (tokio enters later only for the MCP HTTP transport and the dashboard.)
+//!
+//! Note on parallelism: connection threads run the DB-free framing/extraction
+//! concurrently, but embedding serializes through the shared embedder's single ONNX
+//! session (see [`memeora_core::embed::fastembed`]). Moving inference off the writer
+//! still matters (the writer isn't blocked on it); it just isn't cross-client parallel.
 
 use std::io::{self, BufReader};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -33,6 +38,16 @@ const MAX_CONNECTIONS: usize = 256;
 struct Job {
     prepared: Prepared,
     reply: Sender<Response>,
+}
+
+/// RAII guard for the live-connection count: decrements on drop so a connection
+/// slot is released even if its thread unwinds (see the accept loop).
+struct ActiveSlot(Arc<AtomicUsize>);
+
+impl Drop for ActiveSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 /// Spawn the writer-actor: it owns the `Engine` and applies jobs serially.
@@ -90,8 +105,13 @@ pub fn serve(engine: Engine, socket: &str) -> io::Result<()> {
                 let preparer = preparer.clone();
                 let active = Arc::clone(&active);
                 thread::spawn(move || {
+                    // RAII so the slot is freed on thread exit *including a panic* in
+                    // prepare/handle_conn — `handle_conn` runs embedding/extraction on
+                    // this thread, outside the writer's `catch_unwind`, so a bare
+                    // `fetch_sub` after the call would be skipped on unwind and leak
+                    // the slot until the daemon stops accepting (a zombie at 256).
+                    let _slot = ActiveSlot(active);
                     handle_conn(stream, &writer, &preparer);
-                    active.fetch_sub(1, Ordering::Relaxed);
                 });
             }
             Err(e) => eprintln!("memeora-daemon: accept error: {e}"),
@@ -112,7 +132,8 @@ fn handle_conn(stream: Stream, writer: &SyncSender<Job>, preparer: &Preparer) {
             Err(_) => break,   // truncated / bad frame
         };
 
-        // Embedding/extraction happens here (off the writer), parallel across clients.
+        // Embedding/extraction happens here, off the writer thread (extraction is
+        // parallel; embedding serializes on the shared model — see the module docs).
         let response = match preparer.prepare(request) {
             Ok(prepared) => {
                 let (reply_tx, reply_rx) = mpsc::channel();

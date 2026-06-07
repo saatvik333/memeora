@@ -22,6 +22,11 @@ use crate::error::{Error, Result};
 /// behind a [`Mutex`]: the trait exposes `&self` methods and the daemon shares one
 /// instance across tasks. Inference is CPU-bound, so callers should invoke it from
 /// a blocking context (e.g. `spawn_blocking`), never directly on a tokio worker.
+///
+/// Note: that single `Mutex` **serializes** embedding — concurrent callers queue on
+/// the one ONNX session, so embedding does not parallelize across clients (only the
+/// DB-free framing/extraction around it does). It is still off the DB writer thread.
+/// Real inference concurrency would need a pool of sessions behind this provider.
 pub struct FastEmbedder {
     model: Mutex<TextEmbedding>,
     space: EmbeddingSpace,
@@ -87,10 +92,10 @@ impl EmbeddingProvider for FastEmbedder {
     }
 
     fn embed_documents(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
-        let mut model = self
-            .model
-            .lock()
-            .map_err(|_| Error::Embedding("fastembed model lock poisoned".into()))?;
+        // Recover from a poisoned lock (a prior `embed` panic) rather than turning
+        // it into a permanent process-wide failure: the worst case is one bad batch,
+        // never a daemon that returns errors forever. Matches `ProfileCache::lock`.
+        let mut model = self.model.lock().unwrap_or_else(|e| e.into_inner());
         // `None` batch size uses fastembed's default (256). Vectors are L2-normalised.
         model
             .embed(texts, None)

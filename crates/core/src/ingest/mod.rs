@@ -144,12 +144,25 @@ pub fn ingest_prepared(
     for (candidate, embedding) in prepared {
         let id = content_id(container_tag, &candidate.content);
 
-        // Exact re-ingest is idempotent: if this content already exists, reinforce
-        // it. (Going through `upsert` here would reset strength/created_at, and the
-        // KNN distance/kind heuristic below can miss the literal-same row.)
-        if store.get(&id)?.is_some() {
-            store.reinforce(&id, params.reinforce_delta)?;
-            outcome.reinforced.push(id);
+        // Exact re-ingest by content id, handled before the KNN heuristic (which can
+        // miss the literal-same row).
+        if let Some(existing) = store.get(&id)? {
+            if existing.is_latest {
+                // Live row: reinforce it (going through `upsert` would reset
+                // strength/created_at).
+                store.reinforce(&id, params.reinforce_delta)?;
+                outcome.reinforced.push(id);
+            } else {
+                // The content was forgotten (`is_latest = 0`, vec row removed).
+                // Re-stating it must *resurrect* it, not reinforce an invisible row:
+                // `upsert` restores `is_latest = 1` and re-inserts the vec + FTS rows
+                // (and preserves existing graph edges). Resurrect this exact id rather
+                // than falling through to the KNN path, which could reinforce a
+                // *different* neighbor instead of bringing this content back.
+                let memory = candidate.into_memory(id.clone(), container_tag, embedding);
+                store.upsert(&memory)?;
+                outcome.added.push(id);
+            }
             continue;
         }
 
@@ -307,6 +320,50 @@ mod tests {
             strength_after > strength_before,
             "strength must increase on re-ingest, not reset"
         );
+    }
+
+    #[test]
+    fn reingesting_forgotten_content_resurrects_it() {
+        // ingest → forget → re-ingest identical content must bring it back, not
+        // silently reinforce the invisible (is_latest=0) row.
+        let extractor = HeuristicExtractor::default();
+        let embedder =
+            MapEmbedder::new(&[("I prefer dark mode in my editor", vec![1.0, 0.0, 0.0])]);
+        let mut store = SqliteStore::open_in_memory(3).unwrap();
+        let tag = "t";
+        let text = "I prefer dark mode in my editor";
+
+        let first = ingest(
+            &mut store,
+            &embedder,
+            &extractor,
+            tag,
+            text,
+            &IngestParams::default(),
+        )
+        .unwrap();
+        let id = first.added[0].clone();
+
+        store.forget(&id).unwrap();
+        assert_eq!(store.count(tag).unwrap(), 0, "forgotten → invisible");
+
+        // Re-state the same content: it must reappear (counted as added, not reinforced).
+        let again = ingest(
+            &mut store,
+            &embedder,
+            &extractor,
+            tag,
+            text,
+            &IngestParams::default(),
+        )
+        .unwrap();
+        assert_eq!(again.added, vec![id.clone()], "resurrected, not reinforced");
+        assert_eq!(again.reinforced.len(), 0);
+        // Visible again across every active read path.
+        assert_eq!(store.count(tag).unwrap(), 1);
+        assert!(store.get(&id).unwrap().unwrap().is_latest);
+        assert_eq!(store.knn(tag, &[1.0, 0.0, 0.0], 5).unwrap().len(), 1);
+        assert_eq!(store.list_latest(tag, 5).unwrap().len(), 1);
     }
 
     #[test]

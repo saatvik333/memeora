@@ -6,33 +6,91 @@
 //! in a single batch.
 
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::sync::Mutex;
 
 use crate::Result;
 use crate::embed::{EmbeddingProvider, EmbeddingSpace};
 
-/// Wraps an [`EmbeddingProvider`] with an in-memory, content-keyed cache.
+/// Default entry cap. At ~1.5 KB per 384-d vector this bounds the cache to a few
+/// tens of MB — enough to shield hot repeats without growing without limit.
+pub const DEFAULT_CAPACITY: usize = 50_000;
+
+/// Bounded, insertion-ordered (FIFO-evicted) content cache.
+struct Cache {
+    map: HashMap<String, Vec<f32>>,
+    /// Keys in insertion order; the front is evicted first when over capacity.
+    order: VecDeque<String>,
+    capacity: usize,
+}
+
+impl Cache {
+    fn new(capacity: usize) -> Self {
+        Cache {
+            map: HashMap::new(),
+            order: VecDeque::new(),
+            capacity: capacity.max(1),
+        }
+    }
+
+    fn get(&self, key: &str) -> Option<Vec<f32>> {
+        self.map.get(key).cloned()
+    }
+
+    fn put(&mut self, key: String, value: Vec<f32>) {
+        if let Some(slot) = self.map.get_mut(&key) {
+            *slot = value; // refresh in place; keep its existing order position
+            return;
+        }
+        while self.map.len() >= self.capacity {
+            // Evict oldest-inserted until there is room for the new entry.
+            match self.order.pop_front() {
+                Some(old) => {
+                    self.map.remove(&old);
+                }
+                None => break,
+            }
+        }
+        self.order.push_back(key.clone());
+        self.map.insert(key, value);
+    }
+}
+
+/// Wraps an [`EmbeddingProvider`] with a bounded, content-keyed cache.
 ///
-/// The cache is keyed by the document text. Because each `CachingEmbedder` wraps
-/// exactly one inner provider (one [`EmbeddingSpace`]), the text alone is a
-/// sufficient key — vectors from different spaces never share a cache.
+/// Keys are namespaced by intent — `d:` for documents, `q:` for queries — because
+/// asymmetric models (BGE) embed a query differently from a document (an
+/// instruction prefix). A query and an identical-text document therefore never
+/// collide, and [`embed_query`](CachingEmbedder::embed_query) reaches the inner
+/// provider's query path rather than the passage encoder.
 pub struct CachingEmbedder<E> {
     inner: E,
-    cache: Mutex<HashMap<String, Vec<f32>>>,
+    cache: Mutex<Cache>,
 }
 
 impl<E: EmbeddingProvider> CachingEmbedder<E> {
-    /// Wrap `inner` with an empty cache.
+    /// Wrap `inner` with an empty cache of [`DEFAULT_CAPACITY`].
     pub fn new(inner: E) -> Self {
+        Self::with_capacity(inner, DEFAULT_CAPACITY)
+    }
+
+    /// Wrap `inner` with an empty cache bounded to `capacity` entries.
+    pub fn with_capacity(inner: E, capacity: usize) -> Self {
         CachingEmbedder {
             inner,
-            cache: Mutex::new(HashMap::new()),
+            cache: Mutex::new(Cache::new(capacity)),
         }
+    }
+
+    /// Recover the lock guard even if a previous holder panicked — a poisoned
+    /// cache is at worst stale, never unsafe.
+    fn lock(&self) -> std::sync::MutexGuard<'_, Cache> {
+        self.cache.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Number of cached entries.
     pub fn len(&self) -> usize {
-        self.cache.lock().map(|c| c.len()).unwrap_or(0)
+        self.lock().map.len()
     }
 
     /// Whether the cache is empty.
@@ -40,10 +98,22 @@ impl<E: EmbeddingProvider> CachingEmbedder<E> {
         self.len() == 0
     }
 
+    /// Drop every cached entry.
+    pub fn clear(&self) {
+        let mut cache = self.lock();
+        cache.map.clear();
+        cache.order.clear();
+    }
+
     /// Drop the cache, returning the wrapped provider.
     pub fn into_inner(self) -> E {
         self.inner
     }
+}
+
+/// Cache key for a document text.
+fn doc_key(text: &str) -> String {
+    format!("d:{text}")
 }
 
 impl<E: EmbeddingProvider> EmbeddingProvider for CachingEmbedder<E> {
@@ -57,13 +127,10 @@ impl<E: EmbeddingProvider> EmbeddingProvider for CachingEmbedder<E> {
         let mut miss_indices: Vec<usize> = Vec::new();
 
         {
-            let cache = self
-                .cache
-                .lock()
-                .map_err(|_| crate::Error::Embedding("embedding cache lock poisoned".into()))?;
+            let cache = self.lock();
             for (i, &text) in texts.iter().enumerate() {
-                match cache.get(text) {
-                    Some(vec) => results[i] = Some(vec.clone()),
+                match cache.get(&doc_key(text)) {
+                    Some(vec) => results[i] = Some(vec),
                     None => {
                         miss_texts.push(text);
                         miss_indices.push(i);
@@ -81,13 +148,10 @@ impl<E: EmbeddingProvider> EmbeddingProvider for CachingEmbedder<E> {
                     miss_texts.len()
                 )));
             }
-            let mut cache = self
-                .cache
-                .lock()
-                .map_err(|_| crate::Error::Embedding("embedding cache lock poisoned".into()))?;
+            let mut cache = self.lock();
             for (j, vec) in embedded.into_iter().enumerate() {
                 let original = miss_indices[j];
-                cache.insert(miss_texts[j].to_string(), vec.clone());
+                cache.put(doc_key(miss_texts[j]), vec.clone());
                 results[original] = Some(vec);
             }
         }
@@ -97,6 +161,19 @@ impl<E: EmbeddingProvider> EmbeddingProvider for CachingEmbedder<E> {
             .into_iter()
             .map(|v| v.ok_or_else(|| crate::Error::Embedding("cache slot left unfilled".into())))
             .collect()
+    }
+
+    fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
+        // Queries are cached under a `q:` namespace and embedded via the inner
+        // provider's query path (which applies any asymmetric instruction prefix),
+        // never routed through `embed_documents` (the passage encoder).
+        let key = format!("q:{text}");
+        if let Some(vec) = self.lock().get(&key) {
+            return Ok(vec);
+        }
+        let vec = self.inner.embed_query(text)?;
+        self.lock().put(key, vec.clone());
+        Ok(vec)
     }
 }
 
@@ -140,6 +217,21 @@ mod tests {
                     vec![n, n + 1.0, n + 2.0, n + 3.0]
                 })
                 .collect())
+        }
+    }
+
+    /// Provider whose query embedding differs from its document embedding, to
+    /// prove the cache preserves the query/document distinction.
+    struct AsymmetricEmbedder(EmbeddingSpace);
+    impl EmbeddingProvider for AsymmetricEmbedder {
+        fn space(&self) -> &EmbeddingSpace {
+            &self.0
+        }
+        fn embed_documents(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+            Ok(texts.iter().map(|_| vec![1.0, 0.0]).collect())
+        }
+        fn embed_query(&self, _text: &str) -> Result<Vec<f32>> {
+            Ok(vec![0.0, 1.0])
         }
     }
 
@@ -187,12 +279,40 @@ mod tests {
     }
 
     #[test]
-    fn embed_query_uses_cache_and_returns_one_vector() {
+    fn query_is_cached_separately_from_documents() {
         let cache = CachingEmbedder::new(CountingEmbedder::new());
-        let q = cache.embed_query("alpha").unwrap();
-        assert_eq!(q.len(), 4);
-        // The query text is now cached; embedding it as a document is free.
+        let q1 = cache.embed_query("alpha").unwrap();
+        // A second identical query is served from cache (no new inner call).
+        let q2 = cache.embed_query("alpha").unwrap();
+        assert_eq!(q1, q2);
+        // A *document* with the same text is a separate namespace → one more embed.
         cache.embed_documents(&["alpha"]).unwrap();
-        assert_eq!(cache.into_inner().calls(), 1);
+        assert_eq!(
+            cache.into_inner().calls(),
+            2,
+            "query and document caches must not collide"
+        );
+    }
+
+    #[test]
+    fn query_uses_inner_query_path_not_passage_encoder() {
+        let cache =
+            CachingEmbedder::new(AsymmetricEmbedder(EmbeddingSpace::new("mock", "asym", 2)));
+        // Must return the query-flavored vector, not the document one.
+        assert_eq!(cache.embed_query("hello").unwrap(), vec![0.0, 1.0]);
+        assert_eq!(
+            cache.embed_documents(&["hello"]).unwrap()[0],
+            vec![1.0, 0.0]
+        );
+    }
+
+    #[test]
+    fn cache_is_bounded_and_evicts_oldest() {
+        let cache = CachingEmbedder::with_capacity(CountingEmbedder::new(), 2);
+        cache.embed_documents(&["a", "bb", "ccc"]).unwrap();
+        // Capacity 2 → only the two newest survive; growth is bounded.
+        assert_eq!(cache.len(), 2);
+        cache.clear();
+        assert!(cache.is_empty());
     }
 }

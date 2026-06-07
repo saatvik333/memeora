@@ -156,7 +156,9 @@ pub fn extract_text(value: &Value) -> String {
 pub fn redact(text: &str) -> String {
     text.lines()
         .map(|line| {
-            line.split(' ')
+            // Split on ALL whitespace (not just ' '): a tab-indented or
+            // tab-separated token must still be inspected.
+            line.split_whitespace()
                 .map(redact_word)
                 .collect::<Vec<_>>()
                 .join(" ")
@@ -193,17 +195,28 @@ const SECRET_PREFIXES: &[&str] = &[
 ];
 
 /// Redact a single whitespace-delimited word, preserving non-secret text.
+///
+/// Handles tokens wrapped in punctuation (quotes, brackets, trailing commas) by
+/// inspecting the alphanumeric core, so `"sk-…",` and a tab-indented `\tsk-…` are
+/// caught — not just a bare space-delimited token.
 fn redact_word(word: &str) -> String {
+    // `key=value` / `key: value` with a sensitive key → mask only the value.
     if let Some(idx) = word.find(['=', ':']) {
         let (key, rest) = word.split_at(idx);
         let value = &rest[1..];
-        let key_lower = key.to_ascii_lowercase();
-        if !value.is_empty() && SENSITIVE_KEYS.iter().any(|s| key_lower.contains(s)) {
+        let key_core = key
+            .trim_matches(|c: char| !c.is_ascii_alphanumeric())
+            .to_ascii_lowercase();
+        if !value.is_empty() && SENSITIVE_KEYS.iter().any(|s| key_core.contains(s)) {
+            // `rest` starts with the (1-byte ASCII) separator we matched.
             return format!("{key}{}[REDACTED]", &rest[..1]);
         }
     }
-    if looks_secret(word) {
-        return "[REDACTED]".to_string();
+    // Strip surrounding non-alphanumerics before the prefix/entropy check, then
+    // redact just the core so wrapping punctuation (and thus JSON shape) survives.
+    let core = word.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+    if !core.is_empty() && looks_secret(core) {
+        return word.replace(core, "[REDACTED]");
     }
     word.to_string()
 }
@@ -340,6 +353,32 @@ mod tests {
         assert!(kv.contains("in config"));
 
         assert_eq!(redact("I prefer dark mode"), "I prefer dark mode");
+    }
+
+    #[test]
+    fn redact_catches_tokens_wrapped_in_punctuation_or_tabs() {
+        // JSON-embedded (quotes + trailing comma) — the common real-world shape.
+        let json = redact("\"token\": \"sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ012345\",");
+        assert!(!json.contains("sk-ABCDEFG"), "quoted token leaked: {json}");
+        assert!(json.contains("[REDACTED]"));
+
+        // Tab-indented token (split_whitespace must see it).
+        let tabbed = redact("\tghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789");
+        assert!(
+            !tabbed.contains("ghp_ABCDEFG"),
+            "tabbed token leaked: {tabbed}"
+        );
+        assert!(tabbed.contains("[REDACTED]"));
+
+        // High-entropy blob inside parentheses.
+        let paren = redact("(AKIAIOSFODNN7EXAMPLEKEY1234567890)");
+        assert!(
+            paren.contains("[REDACTED]"),
+            "paren-wrapped token leaked: {paren}"
+        );
+
+        // Ordinary punctuated prose is untouched (no false positives).
+        assert_eq!(redact("done, thanks!"), "done, thanks!");
     }
 
     #[test]

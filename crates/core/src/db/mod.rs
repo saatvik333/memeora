@@ -5,7 +5,7 @@ pub mod schema;
 use std::path::Path;
 use std::sync::Once;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 
 use crate::Result;
 
@@ -43,6 +43,21 @@ pub fn open(path: impl AsRef<Path>) -> Result<Connection> {
     let mut conn = Connection::open(path)?;
     configure(&conn, true)?;
     schema::migrate(&mut conn)?;
+    Ok(conn)
+}
+
+/// Open an existing database as a **reader**: the connection refuses writes
+/// (`PRAGMA query_only`) and never creates or migrates the file. For the dashboard's
+/// second connection, so the daemon's writer thread stays the sole DB writer.
+///
+/// Opened read-write at the OS level (minus `CREATE`) so WAL `-shm`/`-wal`
+/// coordination works without the read-only-WAL file-permission caveat; writes are
+/// blocked at the SQL layer by `query_only`. Errors if the file doesn't exist.
+pub fn open_reader(path: impl AsRef<Path>) -> Result<Connection> {
+    register_sqlite_vec();
+    let flags = OpenFlags::default() & !OpenFlags::SQLITE_OPEN_CREATE;
+    let conn = Connection::open_with_flags(path, flags)?;
+    conn.pragma_update(None, "query_only", "ON")?;
     Ok(conn)
 }
 

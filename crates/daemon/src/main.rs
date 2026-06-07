@@ -35,7 +35,17 @@ fn dashboard_addr() -> Option<SocketAddr> {
     if raw.is_empty() || raw.eq_ignore_ascii_case("off") {
         return None;
     }
-    match raw.parse() {
+    match raw.parse::<SocketAddr>() {
+        // The dashboard has no auth — its whole security model is loopback-only.
+        // Refuse a non-loopback bind (e.g. 0.0.0.0) rather than silently exposing
+        // memory contents + destructive forget to the network.
+        Ok(addr) if !addr.ip().is_loopback() => {
+            eprintln!(
+                "memeora-daemon: refusing non-loopback dashboard bind {addr} (the dashboard is unauthenticated); \
+                 use a loopback address or MEMEORA_DASHBOARD_ADDR=off"
+            );
+            None
+        }
         Ok(addr) => Some(addr),
         Err(e) => {
             eprintln!("memeora-daemon: invalid MEMEORA_DASHBOARD_ADDR {raw:?}: {e}; dashboard off");
@@ -77,7 +87,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     // second read-only connection so it never contends with the IPC writer. A
     // failure here is non-fatal: the daemon's core job is the IPC server.
     if let Some(addr) = dashboard_addr() {
-        match SqliteStore::open(&db_path, dim) {
+        // A genuine read-only connection (the writer thread above already created +
+        // migrated the DB), so the dashboard can never write — the daemon stays the
+        // sole writer by construction, not by call-ordering.
+        match SqliteStore::open_readonly(&db_path, dim) {
             Ok(read_store) => {
                 let socket = socket.clone();
                 let events = events_tx.clone();

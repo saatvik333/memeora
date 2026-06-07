@@ -10,8 +10,9 @@ import net from "node:net";
 export const PROTOCOL_VERSION = 1;
 /** Default socket name the daemon listens on. */
 export const DEFAULT_SOCKET = "memeora-daemon.sock";
-/** Maximum frame size (matches the daemon's guard). */
-const MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
+/** Maximum frame size — must equal Rust `memeora_proto::frame::MAX_MESSAGE_BYTES`
+ * (the proto-parity test enforces it). */
+export const MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
 
 /** A memory projected onto the wire. */
 export interface MemoryDto {
@@ -59,8 +60,14 @@ function resolveSocket(socket: string): string {
   if (socket.includes("/") || socket.includes("\\")) return socket;
   if (process.platform === "win32") return `\\\\.\\pipe\\${socket}`;
   if (process.platform === "linux") return `\0${socket}`; // abstract namespace
-  // Other Unix has no abstract namespace; recommend a filesystem path instead.
-  return socket;
+  // macOS/BSD have no abstract namespace, and Rust's `interprocess` maps a bare
+  // name to a temp-dir filesystem path the bare name here would NOT match — so a
+  // default-named connection would silently fail. Refuse it with a clear pointer.
+  throw new Error(
+    `On ${process.platform}, a bare socket name ("${socket}") can't be matched to the ` +
+      `daemon's namespaced socket. Run the daemon with a filesystem socket ` +
+      `(MEMEORA_SOCKET=/path/to.sock) and pass that path to Client.connect().`,
+  );
 }
 
 /** A connected client to a memeora daemon. */
@@ -92,8 +99,17 @@ export class Client {
       sock.once("connect", resolve);
       sock.once("error", reject);
     });
-    const hello = await client.call({ op: "hello", protocol_version: PROTOCOL_VERSION });
-    if (hello.type !== "hello") throw client.unexpected(hello);
+    let hello: Response;
+    try {
+      hello = await client.call({ op: "hello", protocol_version: PROTOCOL_VERSION });
+    } catch (e) {
+      sock.destroy(); // never leak the socket on a failed handshake
+      throw e;
+    }
+    if (hello.type !== "hello") {
+      sock.destroy();
+      throw client.unexpected(hello);
+    }
     if (hello.protocol_version !== PROTOCOL_VERSION) {
       sock.destroy();
       throw new Error(
@@ -171,8 +187,15 @@ export class Client {
 
   private call(request: unknown): Promise<Response> {
     return new Promise<Response>((resolve, reject) => {
-      this.pending.push({ resolve, reject });
       const body = Buffer.from(JSON.stringify(request), "utf8");
+      // Reject oversize frames locally, mirroring Rust's write_message guard, and
+      // BEFORE enqueuing the waiter so the FIFO queue never desyncs (a >4 GiB body
+      // would also throw from writeUInt32BE after the push).
+      if (body.length > MAX_MESSAGE_BYTES) {
+        reject(new Error(`message exceeds MAX_MESSAGE_BYTES (${body.length} > ${MAX_MESSAGE_BYTES})`));
+        return;
+      }
+      this.pending.push({ resolve, reject });
       const header = Buffer.alloc(4);
       header.writeUInt32BE(body.length, 0);
       this.socket.write(Buffer.concat([header, body]));
@@ -185,7 +208,12 @@ export class Client {
     while (this.buffer.length >= 4) {
       const len = this.buffer.readUInt32BE(0);
       if (len > MAX_MESSAGE_BYTES) {
+        // Unrecoverable: a bad prefix would re-trigger forever. Fail everything,
+        // drop the buffered bytes, and close the socket (mirrors Rust closing the
+        // connection on a bad frame) so the FD doesn't leak and later calls reject.
         this.failAll(new Error(`frame too large: ${len} bytes`));
+        this.buffer = Buffer.alloc(0);
+        this.socket.destroy();
         return;
       }
       if (this.buffer.length < 4 + len) break;

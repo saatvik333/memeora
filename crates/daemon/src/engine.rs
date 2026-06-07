@@ -66,8 +66,9 @@ pub(crate) enum Prepared {
 /// Turns a [`Request`] into a [`Prepared`] one by running extraction + embedding.
 ///
 /// Cheaply cloneable (the embedder/extractor are shared `Arc`s) so each connection
-/// thread holds its own handle and inference happens in parallel, never on the
-/// writer thread.
+/// thread holds its own handle and runs extraction/embedding off the writer thread.
+/// (Extraction parallelizes; embedding serializes on the shared model's ONNX
+/// session — the win is keeping inference off the single writer, not parallelism.)
 #[derive(Clone)]
 pub(crate) struct Preparer {
     embedder: Arc<dyn EmbeddingProvider>,

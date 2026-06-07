@@ -196,9 +196,28 @@ capped; a startup probe refuses to start a second daemon on a live socket (cross
 sole-writer). **Protocol:** `Client::connect` performs the version handshake and errors on
 mismatch. **CI:** `deny.toml` gained `[graph] all-features` + tier-1 `targets` so the ML
 stack's licenses/advisories are actually checked. (Deferred: trimming fastembed's
-`image-models` to drop the NCSA exception; bounded LRU on the unused `CachingEmbedder`.)
+`image-models` to drop the NCSA exception.)
 
-*(CI from day one, in parallel with step 1: `fmt`/`clippy`/`test`/`cargo-deny` workflow, `rust-toolchain.toml`, committed `Cargo.lock`.)*
+**Second hardening pass (after a graphify-guided multi-agent review of steps 8–9).**
+*Resilience:* `FastEmbedder` recovers a poisoned model lock via `into_inner()` (a
+single embed panic no longer disables embedding daemon-wide); the connection-count
+decrement is an RAII guard so a panic in `prepare`/`handle_conn` (which run off the
+writer's `catch_unwind`) can't leak a `MAX_CONNECTIONS` slot into a zombie daemon.
+*Correctness:* re-ingesting **forgotten** content now resurrects it (`upsert`) instead
+of reinforcing the invisible `is_latest=0` row; `forget` also deletes the FTS row (no
+BM25 skew); `CachingEmbedder` overrides `embed_query` (honoring the BGE prefix),
+namespaces `q:`/`d:` keys, and is bounded (FIFO eviction + `clear`). *Security:* the
+hook's `redact` tokenizes on all whitespace and inspects the alphanumeric core, so
+quoted/tab/punctuation-wrapped secrets no longer leak; the dashboard refuses a
+non-loopback bind (`MEMEORA_DASHBOARD_ADDR`); the dashboard's reader is a genuine
+read-only connection (`SqliteStore::open_readonly`, `query_only`, no migrate). *TS SDK:*
+outgoing frame-size guard, oversize/handshake socket teardown, an explicit macOS
+bare-name error, and a `bun:test` suite + a **proto-parity test** (TS constants ==
+Rust). *CI:* a new `ts` job (bun) builds/type-checks/tests sdk/ts + dashboard +
+opencode; `scripts/check.sh` runs the same locally. Docs corrected: embedding
+serializes on one ONNX session (only DB-free framing/extraction is parallel).
+
+*(CI from day one, in parallel with step 1: `fmt`/`clippy`/`test`/`cargo-deny` workflow, plus a `ts` (bun) job; `rust-toolchain.toml`, committed `Cargo.lock` + `bun.lock`s.)*
 
 ## Critical files (representative)
 - `crates/core/src/{db/schema.rs, store/sqlite.rs, embeddings/{mod,fastembed,static,hosted}.rs, extract/{heuristic,ner,nli}.rs, search.rs, profile.rs, forget.rs, container_tag.rs}`
