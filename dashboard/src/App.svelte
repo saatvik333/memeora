@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { AlertDialog, ScrollArea, Select, Separator, Tooltip } from "bits-ui";
   import GraphView from "./Graph.svelte";
   import {
     api,
@@ -17,11 +18,11 @@
   let selectedId = $state<string | null>(null);
   let query = $state("");
   let results = $state<Mem[]>([]);
+  let searched = $state(false);
   let live = $state(false);
   let error = $state<string | null>(null);
 
-  // Theme: initialized from <html data-theme> (set pre-paint in index.html), then
-  // toggled + persisted here. `dark` drives the graph's colors reactively.
+  // Theme is set on <html data-theme> pre-paint (index.html); toggle + persist here.
   let theme = $state<"light" | "dark">(
     document.documentElement.dataset.theme === "dark" ? "dark" : "light",
   );
@@ -31,17 +32,14 @@
     try {
       localStorage.setItem("memeora-theme", theme);
     } catch {
-      /* storage may be unavailable (private mode) — non-fatal */
+      /* storage unavailable (private mode) — non-fatal */
     }
   });
-  function toggleTheme() {
-    theme = theme === "dark" ? "light" : "dark";
-  }
+  const toggleTheme = () => (theme = theme === "dark" ? "light" : "dark");
 
-  // Resolve the selected node from the (capped) graph first, then fall back to a
-  // search result — a hit can live outside the 2000-node graph window, and without
-  // this fallback clicking it would silently open nothing. Search `Mem`s lack
-  // is_latest/last_accessed_at, so synthesize sensible defaults for the inspector.
+  let currentLabel = $derived(current ? shortenScope(current) : "Select a space");
+
+  // Resolve the selected node from the (capped) graph first, then a search result.
   let selected = $derived.by(() => {
     if (!selectedId) return null;
     const node = graph.nodes.find((n) => n.id === selectedId);
@@ -70,9 +68,11 @@
   }
 
   function selectScope(tag: string) {
+    if (!tag || tag === current) return;
     current = tag;
     selectedId = null;
     results = [];
+    searched = false;
     query = "";
     loadGraph(tag);
   }
@@ -80,10 +80,12 @@
   async function runSearch() {
     if (!current || !query.trim()) {
       results = [];
+      searched = false;
       return;
     }
     try {
       results = await api.search(current, query);
+      searched = true;
     } catch (e) {
       error = String(e);
     }
@@ -101,7 +103,6 @@
 
   onMount(() => {
     loadScopes();
-    // Live mode: refetch the current scope (and the scope list) on any change.
     const es = api.events((ev) => {
       live = true;
       if (current && ev.scope === current) loadGraph(current);
@@ -111,96 +112,191 @@
   });
 </script>
 
-<div class="app">
-  <aside class="sidebar">
-    <h1>
-      memeora
-      <span class="live" class:on={live} title={live ? "live" : "idle"}>●</span>
-      <button
-        class="theme-toggle"
-        onclick={toggleTheme}
-        title={dark ? "Switch to light mode" : "Switch to dark mode"}
-        aria-label="Toggle dark mode"
-      >
-        {dark ? "☀" : "☾"}
-      </button>
-    </h1>
+{#snippet caret()}
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+    stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="m6 9 6 6 6-6" /></svg>
+{/snippet}
+{#snippet check()}
+  <svg class="check" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+    stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M20 6 9 17l-5-5" /></svg>
+{/snippet}
+{#snippet sun()}
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+    stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <circle cx="12" cy="12" r="4" />
+    <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
+  </svg>
+{/snippet}
+{#snippet moon()}
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+    stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" /></svg>
+{/snippet}
 
-    <input
-      class="search"
-      placeholder="Search this space…"
-      bind:value={query}
-      onkeydown={(e) => e.key === "Enter" && runSearch()}
-    />
+<Tooltip.Provider delayDuration={300}>
+  <div class="app">
+    <aside class="sidebar">
+      <header class="brand">
+        <span class="brand-name">memeora</span>
+        <span class="dot" class:on={live} title={live ? "live" : "idle"}></span>
+        <Tooltip.Root>
+          <Tooltip.Trigger
+            class="icon-btn spacer"
+            onclick={toggleTheme}
+            aria-label="Toggle theme"
+          >
+            {#if dark}{@render sun()}{:else}{@render moon()}{/if}
+          </Tooltip.Trigger>
+          <Tooltip.Portal>
+            <Tooltip.Content sideOffset={6}>
+              {dark ? "Light mode" : "Dark mode"}
+            </Tooltip.Content>
+          </Tooltip.Portal>
+        </Tooltip.Root>
+      </header>
 
-    {#if results.length}
-      <div class="results">
-        <h2>Results</h2>
-        <ul>
-          {#each results as r (r.id)}
-            <li>
-              <button onclick={() => (selectedId = r.id)}>
-                <span class="dot" style="background:{kindColor(r.kind)}"></span>
-                {r.content}
-              </button>
-            </li>
-          {/each}
-        </ul>
+      <Separator.Root />
+
+      <div class="section">
+        <p class="label">Space</p>
+        <Select.Root
+          type="single"
+          value={current ?? ""}
+          onValueChange={(v) => selectScope(v)}
+        >
+          <Select.Trigger aria-label="Select a space">
+            <span class="truncate">{currentLabel}</span>
+            {@render caret()}
+          </Select.Trigger>
+          <Select.Portal>
+            <Select.Content sideOffset={6}>
+              <Select.Viewport>
+                {#each scopes as s (s.tag)}
+                  <Select.Item value={s.tag} label={shortenScope(s.tag)}>
+                    {#snippet children({ selected })}
+                      {#if selected}{@render check()}{:else}<span class="check"></span>{/if}
+                      <span class="truncate">{shortenScope(s.tag)}</span>
+                      <span class="spacer muted">{s.latest}</span>
+                    {/snippet}
+                  </Select.Item>
+                {/each}
+              </Select.Viewport>
+            </Select.Content>
+          </Select.Portal>
+        </Select.Root>
       </div>
-    {/if}
 
-    <h2>Spaces</h2>
-    <ul class="scopes">
-      {#each scopes as s (s.tag)}
-        <li class:active={s.tag === current}>
-          <button onclick={() => selectScope(s.tag)} title={s.tag}>
-            <span>{shortenScope(s.tag)}</span>
-            <em>{s.latest}</em>
-          </button>
-        </li>
-      {:else}
-        <li class="muted">No spaces yet.</li>
-      {/each}
-    </ul>
+      <div class="section">
+        <input
+          class="input"
+          placeholder="Search this space…"
+          bind:value={query}
+          onkeydown={(e) => e.key === "Enter" && runSearch()}
+        />
+      </div>
 
-    {#if error}<p class="error">{error}</p>{/if}
+      <Separator.Root />
 
-    <footer>
-      <span class="lk" style="background:{kindColor('fact')}"></span> fact
-      <span class="lk" style="background:{kindColor('preference')}"></span> pref
-      <span class="lk" style="background:{kindColor('episode')}"></span> episode
-    </footer>
-  </aside>
+      <div class="grow">
+        <ScrollArea.Root>
+          <ScrollArea.Viewport>
+            <div class="section">
+              {#if results.length}
+                <p class="label">Results</p>
+                {#each results as r (r.id)}
+                  <button class="row" onclick={() => (selectedId = r.id)}>
+                    <span class="swatch" style="background:{kindColor(r.kind)}"></span>
+                    <span>{r.content}</span>
+                  </button>
+                {/each}
+              {:else if searched}
+                <p class="muted">No matches.</p>
+              {:else}
+                <p class="muted">Type to search this space.</p>
+              {/if}
+            </div>
+          </ScrollArea.Viewport>
+          <ScrollArea.Scrollbar orientation="vertical">
+            <ScrollArea.Thumb />
+          </ScrollArea.Scrollbar>
+        </ScrollArea.Root>
+      </div>
 
-  <main class="canvas">
-    {#if graph.nodes.length}
-      {#key graph.scope}
-        <GraphView data={graph} {dark} onselect={(id) => (selectedId = id)} />
-      {/key}
-    {:else}
-      <div class="empty">No memories in this space yet.</div>
-    {/if}
-  </main>
+      {#if error}<p class="error">{error}</p>{/if}
 
-  {#if selected}
-    <aside class="inspector">
-      <button class="close" onclick={() => (selectedId = null)}>×</button>
-      <span class="kind" style="background:{kindColor(selected.kind)}">
-        {selected.kind}
-      </span>
-      {#if !selected.is_latest}<span class="kind muted">superseded</span>{/if}
-      <p class="content">{selected.content}</p>
-      <dl>
-        <dt>strength</dt>
-        <dd>{selected.strength.toFixed(2)}</dd>
-        <dt>created</dt>
-        <dd>{relativeTime(selected.created_at)}</dd>
-        <dt>last seen</dt>
-        <dd>{relativeTime(selected.last_accessed_at)}</dd>
-        <dt>id</dt>
-        <dd class="mono">{selected.id.slice(0, 16)}…</dd>
-      </dl>
-      <button class="forget" onclick={() => forget(selected!.id)}>Forget</button>
+      <footer class="legend">
+        <span><span class="swatch" style="background:{kindColor('fact')}"></span>fact</span>
+        <span><span class="swatch" style="background:{kindColor('preference')}"></span>pref</span>
+        <span><span class="swatch" style="background:{kindColor('episode')}"></span>episode</span>
+      </footer>
     </aside>
-  {/if}
-</div>
+
+    <main class="canvas">
+      {#if graph.nodes.length}
+        {#key graph.scope}
+          <GraphView data={graph} {dark} onselect={(id) => (selectedId = id)} />
+        {/key}
+      {:else}
+        <div class="empty">No memories in this space yet.</div>
+      {/if}
+    </main>
+
+    {#if selected}
+      <aside class="inspector">
+        <ScrollArea.Root>
+          <ScrollArea.Viewport>
+            <div class="pad">
+              <span class="kind" style="background:{kindColor(selected.kind)}">
+                {selected.kind}
+              </span>
+              {#if !selected.is_latest}
+                <span class="kind is-muted">superseded</span>
+              {/if}
+              <p class="content">{selected.content}</p>
+              <dl class="meta">
+                <dt>strength</dt>
+                <dd>{selected.strength.toFixed(2)}</dd>
+                <dt>created</dt>
+                <dd>{relativeTime(selected.created_at)}</dd>
+                <dt>last seen</dt>
+                <dd>{relativeTime(selected.last_accessed_at)}</dd>
+                <dt>id</dt>
+                <dd class="mono">{selected.id.slice(0, 16)}…</dd>
+              </dl>
+
+              <AlertDialog.Root>
+                <AlertDialog.Trigger class="btn btn-danger">
+                  Forget
+                </AlertDialog.Trigger>
+                <AlertDialog.Portal>
+                  <AlertDialog.Overlay />
+                  <AlertDialog.Content>
+                    <AlertDialog.Title>Forget this memory?</AlertDialog.Title>
+                    <AlertDialog.Description>
+                      It's soft-forgotten (kept but hidden from recall), not
+                      deleted.
+                    </AlertDialog.Description>
+                    <div class="dialog-actions">
+                      <AlertDialog.Cancel class="btn">Cancel</AlertDialog.Cancel>
+                      <AlertDialog.Action
+                        class="btn btn-danger"
+                        onclick={() => selected && forget(selected.id)}
+                      >
+                        Forget
+                      </AlertDialog.Action>
+                    </div>
+                  </AlertDialog.Content>
+                </AlertDialog.Portal>
+              </AlertDialog.Root>
+            </div>
+          </ScrollArea.Viewport>
+          <ScrollArea.Scrollbar orientation="vertical">
+            <ScrollArea.Thumb />
+          </ScrollArea.Scrollbar>
+        </ScrollArea.Root>
+      </aside>
+    {/if}
+  </div>
+</Tooltip.Provider>
