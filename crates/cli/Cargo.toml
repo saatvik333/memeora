@@ -6,14 +6,35 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 authors.workspace = true
+# All binaries are declared explicitly below (one dist app = all binaries).
+autobins = false
 
+# memeora ships as a single `dist` app, so every binary lives in this one package
+# (dist cannot merge separate packages into one installer). The daemon/hook/mcp
+# bins are thin wrappers over their respective library crates' `run()` entrypoints.
 [[bin]]
 name = "memeora"
 path = "src/main.rs"
+
+[[bin]]
+name = "memeora-daemon"
+path = "src/bin/memeora-daemon.rs"
+
+[[bin]]
+name = "memeora-hook"
+path = "src/bin/memeora-hook.rs"
+
+[[bin]]
+name = "memeora-mcp"
+path = "src/bin/memeora-mcp.rs"
 
 [dependencies]
 memeora-client.workspace = true
 memeora-proto.workspace = true
 memeora-core.workspace = true
+memeora-daemon.workspace = true
+memeora-hook.workspace = true
+memeora-mcp.workspace = true
 clap.workspace = true

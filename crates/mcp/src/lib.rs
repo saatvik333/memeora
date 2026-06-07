@@ -10,9 +10,26 @@ use memeora_core::container_tag::project_tag;
 use memeora_proto::MemoryDto;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content};
-use rmcp::{ErrorData, ServerHandler, tool, tool_handler, tool_router};
+use rmcp::transport::stdio;
+use rmcp::{ErrorData, ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::Deserialize;
+
+/// Run the MCP server over stdio until the client disconnects.
+///
+/// Lives in the library (not a `main.rs`) so the single shipped `memeora` package
+/// can expose every binary from one crate (see `docs/ARCHITECTURE.md`, Step 10).
+/// Talks to the daemon at `$MEMEORA_SOCKET` (or [`memeora_proto::DEFAULT_SOCKET`]).
+pub fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async {
+        let socket = std::env::var("MEMEORA_SOCKET")
+            .unwrap_or_else(|_| memeora_proto::DEFAULT_SOCKET.to_string());
+        let service = MemoryServer::new(socket).serve(stdio()).await?;
+        service.waiting().await?;
+        Ok(())
+    })
+}
 
 /// An MCP server backed by a memeora daemon.
 #[derive(Clone)]

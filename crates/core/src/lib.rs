@@ -13,6 +13,7 @@ pub mod embed;
 mod error;
 pub mod extract;
 pub mod ingest;
+pub mod models;
 pub mod profile;
 pub mod search;
 pub mod store;

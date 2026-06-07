@@ -3,11 +3,12 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.0.0"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/saatvik333/memeora"
+homepage = "https://github.com/saatvik333/memeora"
 authors = ["the memeora authors"]
 
 # Shared internal crates — referenced by member crates via `.workspace = true`.
@@ -16,6 +17,7 @@ memeora-core = { path = "crates/core" }
 memeora-proto = { path = "crates/proto" }
 memeora-client = { path = "crates/client" }
 memeora-daemon = { path = "crates/daemon" }
+memeora-hook = { path = "crates/hook" }
 memeora-mcp = { path = "crates/mcp" }
 
 # Shared third-party deps (pinned once for the whole workspace).
@@ -28,3 +30,37 @@ clap = { version = "4", features = ["derive"] }
 [profile.release]
 lto = "thin"
 strip = true
+
+# The profile `dist` builds release artifacts with (inherits the tuned release profile).
+[profile.dist]
+inherits = "release"
+lto = "thin"
+
+# Config for `dist` (formerly cargo-dist) — the release/distribution pipeline.
+# Tier 1 = portable + assets with a dynamically-linked ONNX Runtime (see Risk F in
+# docs/ARCHITECTURE.md); fully-static musl is a deferred tier-2 follow-up. The matrix
+# below builds natively on GitHub-hosted runners (incl. the GA arm64 Linux + macOS
+# runners) so `ort` finds a prebuilt ONNX Runtime for every target.
+[workspace.metadata.dist]
+# Pinned so CI uses exactly the dist that generated `release.yml` (regenerate on bump).
+cargo-dist-version = "0.32.0"
+ci = ["github"]
+# curl|sh + PowerShell are the always-works baseline; Homebrew + npm are wrappers.
+installers = ["shell", "powershell", "homebrew", "npm"]
+tap = "saatvik333/homebrew-tap"
+npm-scope = "@memeora"
+publish-jobs = ["homebrew", "npm"]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+# Per-artifact checksums published alongside the GitHub Release.
+checksum = "sha256"
+install-path = "CARGO_HOME"
+# Native arm64 Linux runner so `ort` gets a prebuilt aarch64 ONNX Runtime
+# (cross-compiling from x86_64 would leave the binary without its native lib).
+[workspace.metadata.dist.github-custom-runners]
+aarch64-unknown-linux-gnu = "ubuntu-22.04-arm"

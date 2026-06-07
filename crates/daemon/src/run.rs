@@ -1,9 +1,10 @@
-//! memeora daemon entrypoint.
+//! The `memeora-daemon` binary entrypoint, as a library function.
 //!
-//! Loads the local embedding model and SQLite store once, then serves the IPC
-//! protocol over a local socket (the writer-actor lives in [`memeora_daemon::serve`]).
-//! Storage lives under `~/.memeora` (override with `MEMEORA_HOME`); the socket name
-//! defaults to [`memeora_proto::DEFAULT_SOCKET`] (override with `MEMEORA_SOCKET`).
+//! Lives in the library (rather than a `main.rs`) so the single shipped `memeora`
+//! package can expose every binary from one crate — `dist` bundles all binaries of
+//! one package into a single installer, and it cannot merge separate packages (see
+//! `docs/ARCHITECTURE.md`, Step 10). The thin `memeora-daemon` bin just calls
+//! [`run`].
 
 use std::error::Error;
 use std::net::SocketAddr;
@@ -11,9 +12,10 @@ use std::path::PathBuf;
 
 use memeora_core::embed::fastembed::FastEmbedder;
 use memeora_core::{EmbeddingProvider, HeuristicExtractor, SqliteStore};
-use memeora_daemon::{Engine, dashboard, serve};
 use memeora_proto::{DEFAULT_SOCKET, PROTOCOL_VERSION};
 use tokio::sync::broadcast;
+
+use crate::{Engine, dashboard, serve};
 
 /// Default address the local dashboard binds (loopback only — no network exposure).
 const DEFAULT_DASHBOARD_ADDR: &str = "127.0.0.1:7878";
@@ -54,17 +56,34 @@ fn dashboard_addr() -> Option<SocketAddr> {
     }
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
+/// Load the model + store once, optionally start the dashboard, then serve IPC
+/// (blocks for the process lifetime — the writer-actor owns the sole DB write conn).
+pub fn run() -> Result<(), Box<dyn Error>> {
     let data_dir = data_dir()?;
     std::fs::create_dir_all(&data_dir)?;
     let db_path = data_dir.join("memory.db");
-    let model_cache = data_dir.join("models");
+    // Honors MEMEORA_MODELS_DIR (offline bundle) → MEMEORA_HOME/models → ~/.memeora/models.
+    let model_cache = memeora_core::models::resolve_dir();
 
     eprintln!(
         "memeora-daemon {} (protocol v{}) — loading model…",
         env!("CARGO_PKG_VERSION"),
         PROTOCOL_VERSION,
     );
+
+    // If the model cache carries a SHA256SUMS manifest (an offline bundle, or one
+    // stamped by `memeora models bundle`), verify integrity before loading — a
+    // corrupt/tampered weight file should fail loudly, not silently mis-embed.
+    if let Ok(Some(report)) = memeora_core::models::verify_dir(&model_cache)
+        && !report.ok()
+    {
+        let (ok, mismatch, missing) = report.counts();
+        eprintln!(
+            "memeora-daemon: WARNING model integrity check failed in {} \
+             ({ok} ok, {mismatch} mismatched, {missing} missing); re-download or re-bundle",
+            model_cache.display()
+        );
+    }
 
     // Local, no-API-key embedder (downloads weights to the cache on first run).
     let embedder = FastEmbedder::bge_small(Some(model_cache))?;

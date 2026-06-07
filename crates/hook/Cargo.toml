@@ -6,16 +6,15 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 authors.workspace = true
 
 [lib]
 name = "memeora_hook"
 path = "src/lib.rs"
 
-[[bin]]
-name = "memeora-hook"
-path = "src/main.rs"
-
+# The `memeora-hook` binary is shipped from the `memeora` crate (one dist app
+# bundles all binaries); this crate is the hook library behind it.
 [dependencies]
 memeora-client.workspace = true
 memeora-proto.workspace = true

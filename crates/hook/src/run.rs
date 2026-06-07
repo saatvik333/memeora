@@ -1,11 +1,7 @@
-//! `memeora-hook` — one binary invoked by AI coding tools' command-hooks.
+//! The `memeora-hook` binary entrypoint, as a library function.
 //!
-//! Host-specific behavior is **data**, not code: `--host <name>` selects a built-in
-//! [`HostDescriptor`] (claude / codex / antigravity) and `--descriptor <path>`
-//! loads a community one. The descriptor says how to read the scope and transcript
-//! from the stdin payload and how to render injection / the capture ack — so adding
-//! a command-hook harness is a TOML file (see `docs/ADAPTERS.md`), not a rebuild.
-//!
+//! Lives in the library (not a `main.rs`) so the single shipped `memeora` package
+//! can expose every binary from one crate (see `docs/ARCHITECTURE.md`, Step 10).
 //! Everything is best-effort: if the daemon is down the hook stays silent rather
 //! than disrupting the host, and a stdin read failure never makes it exit non-zero.
 
@@ -15,13 +11,14 @@ use std::path::PathBuf;
 
 use clap::{Parser, ValueEnum};
 use memeora_client::Client;
-use memeora_hook::descriptor::{self, HostDescriptor};
-use memeora_hook::{
+use memeora_proto::DEFAULT_SOCKET;
+use serde_json::Value;
+
+use crate::descriptor::{self, HostDescriptor};
+use crate::{
     capture_ack, format_context, redact, render_inject, resolve_scope, should_inject,
     transcript_path, transcript_to_text,
 };
-use memeora_proto::DEFAULT_SOCKET;
-use serde_json::Value;
 
 #[derive(Parser)]
 #[command(name = "memeora-hook", version, about = "memeora command-hook adapter")]
@@ -76,7 +73,8 @@ fn resolve_descriptor(args: &Args) -> Result<HostDescriptor, Box<dyn Error>> {
     Err("one of --host or --descriptor is required".into())
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
+/// Parse args, read the stdin payload, and inject or capture per the descriptor.
+pub fn run() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
     let desc = resolve_descriptor(&args)?;
 

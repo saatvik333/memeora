@@ -3,16 +3,18 @@
 //! All host-specific behavior is expressed as data (a [`HostDescriptor`]); the
 //! functions here read the stdin payload and render stdout *through* a descriptor,
 //! so they're pure and fully testable without a daemon (see the conformance kit in
-//! `tests/`). The binary ([`main`](../main.rs)) wires these to stdin/stdout and the
-//! IPC client.
+//! `tests/`). [`run`] wires these to stdin/stdout and the IPC client; the shipped
+//! `memeora-hook` binary is a thin wrapper around it.
 
 pub mod descriptor;
+pub mod run;
 
 use memeora_core::container_tag::project_tag;
 use memeora_proto::MemoryDto;
 use serde_json::Value;
 
 pub use descriptor::{HostDescriptor, InjectStyle};
+pub use run::run;
 
 /// Resolve a dotted payload path: object keys, with numeric segments indexing
 /// arrays (e.g. `workspacePaths.0`). Returns `None` if any segment is missing.

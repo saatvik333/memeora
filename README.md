@@ -6,9 +6,9 @@ memeora gives your AI coding tools **persistent memory** — it learns facts fro
 builds a knowledge graph, and recalls the right context at the right time. It's a free,
 **local-first**, open alternative to hosted memory APIs: **no required LLM, no API key, works offline.**
 
-> **Status:** Steps 1–9 implemented — the engine, its surfaces, per-tool
-> packaging, the local dashboard, and the extensibility/ecosystem layer are
-> end-to-end:
+> **Status:** Steps 1–10 implemented (v0.1.0) — the engine, its surfaces, per-tool
+> packaging, the local dashboard, the extensibility/ecosystem layer, and the
+> cross-platform **release pipeline** are end-to-end:
 > - **Engine (`crates/core`):** SQLite + statically-linked `sqlite-vec` KNN + FTS5 behind the
 >   `VectorStore` trait (container-tag scoping, soft-forget); `EmbeddingProvider` with a
 >   content-hash cache and a local `fastembed` backend; hybrid retrieval (dense + BM25 fused
@@ -37,8 +37,16 @@ builds a knowledge graph, and recalls the right context at the right time. It's 
 >   a TOML file, not Rust — scaffold one with `memeora adapter new`, validate it with the
 >   **conformance kit** (`crates/hook/tests/`). Client SDKs ship for **Rust** (`memeora-client`)
 >   and **TypeScript** ([`@memeora/client`](sdk/ts/)). See [`docs/ADAPTERS.md`](docs/ADAPTERS.md).
+> - **Release:** [`dist`](https://opensource.axo.dev/cargo-dist/) cross-compiles all four
+>   binaries — `memeora`, `memeora-daemon`, `memeora-hook`, `memeora-mcp` — as **one app**
+>   for Linux (x86_64 + arm64), macOS (Intel + Apple Silicon) & Windows, and publishes a
+>   GitHub Release with **shell / PowerShell / Homebrew / npm** installers and per-artifact
+>   **SHA-256** checksums (`.github/workflows/release.yml`, triggered by a `v*` tag). Models
+>   stay out of the binary (Risk F): they download on first run or ship as an offline bundle,
+>   integrity-checked via a `SHA256SUMS` manifest (`memeora models verify` / `bundle`).
 >
-> Next: release. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+> Next (optional/scale): Tier-1 NER, LanceDB, a benchmark harness. See
+> [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## Highlights
 - **Rust** engine + daemon + MCP server + hook binary + CLI → one self-contained distributable.
@@ -58,12 +66,37 @@ builds a knowledge graph, and recalls the right context at the right time. It's 
 | `crates/daemon` | blocking writer-actor daemon: holds models + DB, sole writer; embeds off the writer thread; serves the dashboard (axum + SSE) |
 | `crates/mcp` | `rmcp` MCP server (recall / remember / context / list) |
 | `crates/hook` | `memeora-hook` descriptor-driven command-hook binary (lib + bin) |
-| `crates/cli` | `memeora` CLI (doctor / add / ingest / recall / context / list / forget / scope / dashboard / adapter) |
+| `crates/cli` | `memeora` CLI (doctor / add / ingest / recall / context / list / forget / scope / dashboard / adapter / models) — also the package that ships all four binaries |
 | `dashboard/` | Svelte 5 + Vite + Sigma.js graph UI, embedded into the daemon via `rust-embed` |
 | `sdk/ts/` | `@memeora/client` — TypeScript client over the IPC protocol |
 | `adapters/_descriptors/` | data-driven host descriptors (claude / codex / antigravity) |
 
-## Build
+## Install
+
+Released builds ship every binary (`memeora`, `memeora-daemon`, `memeora-hook`,
+`memeora-mcp`) in a single installer. Pick one:
+
+```sh
+# Linux / macOS — shell installer (curl | sh)
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/saatvik333/memeora/releases/latest/download/memeora-installer.sh | sh
+
+# macOS / Linux — Homebrew
+brew install saatvik333/tap/memeora
+
+# any platform — published npm wrapper (use bun; npm/pnpm also work)
+bun add -g @memeora/memeora
+```
+```powershell
+# Windows — PowerShell installer
+powershell -ExecutionPolicy ByPass -c "irm https://github.com/saatvik333/memeora/releases/latest/download/memeora-installer.ps1 | iex"
+```
+
+Or grab a prebuilt archive (with its `.sha256`) from the [releases page](https://github.com/saatvik333/memeora/releases).
+The first daemon run downloads the embedding model to `~/.memeora/models`; for an
+**air-gapped** install, drop the model files there (or point `MEMEORA_MODELS_DIR` at a
+bundle) and verify integrity with `memeora models verify`.
+
+## Build (from source)
 ```sh
 cargo build --workspace
 cargo test --workspace

@@ -6,12 +6,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 authors.workspace = true
 
-[[bin]]
-name = "memeora-daemon"
-path = "src/main.rs"
-
+# The `memeora-daemon` binary is shipped from the `memeora` crate (one dist app
+# bundles all binaries); this crate is the daemon library behind it.
 [dependencies]
 memeora-core = { workspace = true, features = ["fastembed"] }
 memeora-proto.workspace = true

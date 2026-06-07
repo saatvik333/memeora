@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use memeora_client::Client;
 use memeora_core::container_tag::project_tag;
+use memeora_core::models;
 use memeora_proto::DEFAULT_SOCKET;
 
 /// Default address the daemon serves the dashboard on (see `memeora-daemon`).
@@ -93,6 +94,89 @@ enum Command {
         #[command(subcommand)]
         cmd: AdapterCmd,
     },
+    /// Inspect and verify the local model cache (daemon-free).
+    Models {
+        #[command(subcommand)]
+        cmd: ModelsCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum ModelsCmd {
+    /// Print the resolved model cache directory.
+    Dir,
+    /// Verify model files against the cache's SHA256SUMS manifest.
+    ///
+    /// Exits non-zero if any file is mismatched or missing — usable in scripts to
+    /// gate on an intact offline bundle before starting the daemon.
+    Verify {
+        /// Directory to verify (default: the resolved model cache).
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
+    /// Stamp a SHA256SUMS manifest over the cache (for an offline model bundle).
+    Bundle {
+        /// Directory to stamp (default: the resolved model cache).
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Overwrite an existing manifest.
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+/// Handle the daemon-free `models` commands.
+fn run_models(cmd: &ModelsCmd) -> Result<(), Box<dyn Error>> {
+    match cmd {
+        ModelsCmd::Dir => println!("{}", models::resolve_dir().display()),
+        ModelsCmd::Verify { dir } => {
+            let dir = dir.clone().unwrap_or_else(models::resolve_dir);
+            match models::verify_dir(&dir)? {
+                None => {
+                    println!("no {} manifest in {}", models::MANIFEST_NAME, dir.display());
+                    println!("(nothing to verify — run `memeora models bundle` to create one)");
+                }
+                Some(report) => {
+                    for r in &report.results {
+                        match &r.status {
+                            models::AssetStatus::Ok => {}
+                            models::AssetStatus::Mismatch { .. } => {
+                                println!("MISMATCH  {}", r.path)
+                            }
+                            models::AssetStatus::Missing => println!("MISSING   {}", r.path),
+                        }
+                    }
+                    let (ok, mismatch, missing) = report.counts();
+                    println!(
+                        "{ok} ok, {mismatch} mismatched, {missing} missing  ({})",
+                        dir.display()
+                    );
+                    if !report.ok() {
+                        return Err("model verification failed".into());
+                    }
+                }
+            }
+        }
+        ModelsCmd::Bundle { dir, force } => {
+            let dir = dir.clone().unwrap_or_else(models::resolve_dir);
+            let manifest_path = dir.join(models::MANIFEST_NAME);
+            if manifest_path.exists() && !force {
+                return Err(format!(
+                    "{} already exists; pass --force to overwrite",
+                    manifest_path.display()
+                )
+                .into());
+            }
+            let manifest = models::generate_manifest(&dir)?;
+            std::fs::write(&manifest_path, &manifest)?;
+            println!(
+                "wrote {} ({} files)",
+                manifest_path.display(),
+                manifest.lines().count()
+            );
+        }
+    }
+    Ok(())
 }
 
 #[derive(Subcommand)]
@@ -264,6 +348,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         return Ok(());
     }
+    if let Command::Models { cmd } = &cli.command {
+        return run_models(cmd);
+    }
 
     let socket = cli.socket.unwrap_or_else(|| DEFAULT_SOCKET.to_string());
     let mut client = Client::connect(&socket).map_err(|e| {
@@ -276,6 +363,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             println!("daemon ok — protocol v{version} (socket {socket})");
             println!("server version: {}", client.server_version());
             println!("capabilities: {}", client.capabilities().join(", "));
+            let dir = models::resolve_dir();
+            println!("model cache: {}", dir.display());
+            match models::verify_dir(&dir) {
+                Ok(Some(report)) => {
+                    let (ok, mismatch, missing) = report.counts();
+                    println!("model integrity: {ok} ok, {mismatch} mismatched, {missing} missing");
+                }
+                Ok(None) => println!("model integrity: no manifest (unverified)"),
+                Err(e) => println!("model integrity: check error: {e}"),
+            }
         }
         Command::Add {
             scope,
@@ -331,7 +428,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         }
         // Handled above before the daemon connection.
-        Command::Scope { .. } | Command::Adapter { .. } => {
+        Command::Scope { .. } | Command::Adapter { .. } | Command::Models { .. } => {
             unreachable!("daemon-free commands are handled before connecting")
         }
     }

@@ -1800,17 +1800,20 @@ checksum = "6b947ae49db0d222b1dbc6b113ce7248a3fc3a6ca21b696717bfc000ba4484d8"
 
 [[package]]
 name = "memeora"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "clap",
  "memeora-client",
  "memeora-core",
+ "memeora-daemon",
+ "memeora-hook",
+ "memeora-mcp",
  "memeora-proto",
 ]
 
 [[package]]
 name = "memeora-client"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "interprocess",
  "memeora-core",
@@ -1820,8 +1823,9 @@ dependencies = [
 
 [[package]]
 name = "memeora-core"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
+ "dirs",
  "fastembed",
  "rusqlite",
  "rusqlite_migration",
@@ -1831,7 +1835,7 @@ dependencies = [
 
 [[package]]
 name = "memeora-daemon"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "axum",
  "dirs",
@@ -1850,7 +1854,7 @@ dependencies = [
 
 [[package]]
 name = "memeora-hook"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "clap",
  "memeora-client",
@@ -1863,7 +1867,7 @@ dependencies = [
 
 [[package]]
 name = "memeora-mcp"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "memeora-client",
  "memeora-core",
@@ -1876,7 +1880,7 @@ dependencies = [
 
 [[package]]
 name = "memeora-proto"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "interprocess",
  "serde",
