@@ -196,4 +196,8 @@ pub trait VectorStore {
 
     /// All outgoing edges from `id`.
     fn edges_from(&self, id: &str) -> Result<Vec<Relationship>>;
+
+    /// Soft-forget a memory: mark it not-latest so retrieval skips it. The row is
+    /// never hard-deleted (it stays fetchable by [`get`](VectorStore::get)).
+    fn forget(&mut self, id: &str) -> Result<()>;
 }

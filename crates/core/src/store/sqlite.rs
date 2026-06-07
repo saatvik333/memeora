@@ -154,6 +154,7 @@ impl VectorStore for SqliteStore {
              )
              SELECT {MEMORY_COLS}, knn.distance AS distance
              FROM knn JOIN memories m ON m.rowid = knn.memory_rowid
+             WHERE m.is_latest = 1
              ORDER BY knn.distance"
         );
         let mut stmt = self.conn.prepare(&sql)?;
@@ -171,7 +172,7 @@ impl VectorStore for SqliteStore {
         let sql = format!(
             "SELECT {MEMORY_COLS}, bm25(fts_memories) AS distance
              FROM fts_memories f JOIN memories m ON m.id = f.memory_id
-             WHERE fts_memories MATCH ?1 AND m.container_tag = ?2
+             WHERE fts_memories MATCH ?1 AND m.container_tag = ?2 AND m.is_latest = 1
              ORDER BY distance
              LIMIT ?3"
         );
@@ -197,7 +198,7 @@ impl VectorStore for SqliteStore {
 
     fn count(&self, container_tag: &str) -> Result<usize> {
         let n: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM memories WHERE container_tag = ?1",
+            "SELECT COUNT(*) FROM memories WHERE container_tag = ?1 AND is_latest = 1",
             params![container_tag],
             |r| r.get(0),
         )?;
@@ -249,6 +250,14 @@ impl VectorStore for SqliteStore {
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
+    }
+
+    fn forget(&mut self, id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE memories SET is_latest = 0 WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
     }
 }
 
@@ -350,6 +359,25 @@ mod tests {
         assert_eq!(s.get("m1").unwrap().unwrap().strength, 1.5);
         // Unknown id is a no-op, not an error.
         s.reinforce("nope", 1.0).unwrap();
+    }
+
+    #[test]
+    fn forget_hides_from_retrieval_but_keeps_row() {
+        let mut s = SqliteStore::open_in_memory(2).unwrap();
+        let tag = "t";
+        s.upsert(&mem("m1", "the user prefers tailwind", tag, vec![1.0, 0.0]))
+            .unwrap();
+        assert_eq!(s.count(tag).unwrap(), 1);
+
+        s.forget("m1").unwrap();
+
+        // Gone from every active read path...
+        assert_eq!(s.count(tag).unwrap(), 0);
+        assert!(s.knn(tag, &[1.0, 0.0], 5).unwrap().is_empty());
+        assert!(s.text_search(tag, "tailwind", 5).unwrap().is_empty());
+        assert!(s.list_latest(tag, 5).unwrap().is_empty());
+        // ...but never hard-deleted.
+        assert!(s.get("m1").unwrap().is_some());
     }
 
     #[test]
