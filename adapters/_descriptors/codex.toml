@@ -1,0 +1,14 @@
+# memeora host descriptor — OpenAI Codex.
+#
+# Codex shares Claude's payload shape and injection format; it only requires that
+# capture events still print valid JSON on stdout. See docs/ADAPTERS.md.
+name = "codex"
+
+scope_fields = ["cwd"]
+transcript_fields = ["transcript_path", "transcriptPath"]
+
+inject_style = "additional_context"
+inject_event_name = "SessionStart"
+
+# Codex rejects non-JSON stdout from Stop; "{}" is a valid no-op ack.
+capture_ack = "{}"

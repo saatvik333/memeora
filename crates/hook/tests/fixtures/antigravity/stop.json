@@ -1,0 +1,9 @@
+{
+  "host": "antigravity",
+  "event": "stop",
+  "payload": { "workspacePaths": ["/ws/a"], "transcriptPath": "/ws/a/.antigravity/t.jsonl" },
+  "expect": {
+    "transcript_path": "/ws/a/.antigravity/t.jsonl",
+    "ack_json": { "decision": "stop" }
+  }
+}

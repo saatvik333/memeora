@@ -1,0 +1,23 @@
+# memeora host descriptor — Claude Code.
+#
+# Drives `memeora-hook` for this host: how to read the scope and transcript from
+# the stdin payload, and how to render context injection / the capture ack on
+# stdout. See docs/ADAPTERS.md.
+name = "claude"
+
+# Payload field paths to read the project directory from (first hit wins; the hook
+# then falls back to the process cwd). Dotted paths index objects; numeric segments
+# index arrays (e.g. "workspacePaths.0").
+scope_fields = ["cwd"]
+
+# Payload field paths for the transcript file captured at Stop / PreCompact.
+transcript_fields = ["transcript_path", "transcriptPath"]
+
+# Injection render style:
+#   additional_context → {"hookSpecificOutput":{"hookEventName":<inject_event_name>,"additionalContext":<text>}}
+#   inject_steps       → {"injectSteps":[{"userMessage":<text>}]}
+inject_style = "additional_context"
+inject_event_name = "SessionStart"
+
+# Raw JSON the capture events must print on stdout ("" = print nothing).
+capture_ack = "{}"

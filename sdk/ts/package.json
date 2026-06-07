@@ -1,0 +1,28 @@
+{
+  "name": "@memeora/client",
+  "version": "0.0.0",
+  "description": "TypeScript client for the memeora daemon IPC protocol.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "README.md"],
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "tsc"
+  },
+  "keywords": ["memeora", "memory", "ai", "agent", "ipc"],
+  "license": "MIT OR Apache-2.0",
+  "repository": "https://github.com/saatvik333/memeora",
+  "homepage": "https://github.com/saatvik333/memeora/tree/main/sdk/ts",
+  "engines": { "node": ">=18" },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.3"
+  }
+}

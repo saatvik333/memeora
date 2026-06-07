@@ -15,6 +15,10 @@ use memeora_proto::{
 /// A connected client to a memeora daemon.
 pub struct Client {
     conn: BufReader<Stream>,
+    /// Daemon crate version, captured during the connect handshake.
+    server_version: String,
+    /// Capabilities the daemon advertised at connect (see [`memeora_proto::capability`]).
+    capabilities: Vec<String>,
 }
 
 impl Client {
@@ -32,8 +36,10 @@ impl Client {
         let stream = Stream::connect(build_name(socket)?)?;
         let mut client = Client {
             conn: BufReader::new(stream),
+            server_version: String::new(),
+            capabilities: Vec::new(),
         };
-        let daemon_version = client.hello()?;
+        let (daemon_version, server_version, capabilities) = client.handshake()?;
         if daemon_version != PROTOCOL_VERSION {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -42,6 +48,8 @@ impl Client {
                 ),
             ));
         }
+        client.server_version = server_version;
+        client.capabilities = capabilities;
         Ok(client)
     }
 
@@ -52,16 +60,38 @@ impl Client {
             .ok_or_else(|| io::Error::other("daemon closed the connection"))
     }
 
-    /// Handshake; returns the daemon's protocol version.
-    pub fn hello(&mut self) -> io::Result<u32> {
+    /// Perform the handshake, returning `(protocol_version, server_version, capabilities)`.
+    fn handshake(&mut self) -> io::Result<(u32, String, Vec<String>)> {
         match self.call(&Request::Hello {
             protocol_version: PROTOCOL_VERSION,
         })? {
             Response::Hello {
-                protocol_version, ..
-            } => Ok(protocol_version),
+                protocol_version,
+                server_version,
+                capabilities,
+            } => Ok((protocol_version, server_version, capabilities)),
             other => Err(unexpected(other)),
         }
+    }
+
+    /// Handshake; returns the daemon's protocol version.
+    pub fn hello(&mut self) -> io::Result<u32> {
+        Ok(self.handshake()?.0)
+    }
+
+    /// The daemon's crate version, captured at connect.
+    pub fn server_version(&self) -> &str {
+        &self.server_version
+    }
+
+    /// Capabilities the daemon advertised at connect (see [`memeora_proto::capability`]).
+    pub fn capabilities(&self) -> &[String] {
+        &self.capabilities
+    }
+
+    /// Whether the connected daemon advertised support for `capability`.
+    pub fn supports(&self, capability: &str) -> bool {
+        self.capabilities.iter().any(|c| c == capability)
     }
 
     /// Ingest raw text; returns `(added, reinforced)` counts.
@@ -184,6 +214,10 @@ mod tests {
         let mut client = connect_retry(socket);
 
         assert_eq!(client.hello().unwrap(), PROTOCOL_VERSION);
+        // The connect handshake captured the daemon's capabilities.
+        assert!(client.supports(memeora_proto::capability::RECALL));
+        assert!(!client.supports("nonexistent-capability"));
+        assert!(!client.server_version().is_empty());
 
         let id = client.add("s", "I prefer dark mode", "preference").unwrap();
         assert!(!id.is_empty());

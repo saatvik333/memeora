@@ -6,8 +6,9 @@ memeora gives your AI coding tools **persistent memory** — it learns facts fro
 builds a knowledge graph, and recalls the right context at the right time. It's a free,
 **local-first**, open alternative to hosted memory APIs: **no required LLM, no API key, works offline.**
 
-> **Status:** Steps 1–8 implemented — the engine, its surfaces, per-tool
-> packaging, and the local dashboard are end-to-end:
+> **Status:** Steps 1–9 implemented — the engine, its surfaces, per-tool
+> packaging, the local dashboard, and the extensibility/ecosystem layer are
+> end-to-end:
 > - **Engine (`crates/core`):** SQLite + statically-linked `sqlite-vec` KNN + FTS5 behind the
 >   `VectorStore` trait (container-tag scoping, soft-forget); `EmbeddingProvider` with a
 >   content-hash cache and a local `fastembed` backend; hybrid retrieval (dense + BM25 fused
@@ -30,8 +31,14 @@ builds a knowledge graph, and recalls the right context at the right time. It's 
 >   on `127.0.0.1` only. Sole-writer stays intact: reads use a second read-only SQLite
 >   connection, while `search`/`forget` route back through the daemon's own IPC. Open it with
 >   `memeora dashboard`.
+> - **Ecosystem:** the IPC protocol is **versioned with a capability handshake**
+>   ([`docs/PROTOCOL.md`](docs/PROTOCOL.md)); command-hook hosts are **data-driven host
+>   descriptors** ([`adapters/_descriptors/`](adapters/_descriptors/)) so adding a harness is
+>   a TOML file, not Rust — scaffold one with `memeora adapter new`, validate it with the
+>   **conformance kit** (`crates/hook/tests/`). Client SDKs ship for **Rust** (`memeora-client`)
+>   and **TypeScript** ([`@memeora/client`](sdk/ts/)). See [`docs/ADAPTERS.md`](docs/ADAPTERS.md).
 >
-> Next: ecosystem, release. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+> Next: release. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## Highlights
 - **Rust** engine + daemon + MCP server + hook binary + CLI → one self-contained distributable.
@@ -50,9 +57,11 @@ builds a knowledge graph, and recalls the right context at the right time. It's 
 | `crates/client` | Rust client SDK |
 | `crates/daemon` | blocking writer-actor daemon: holds models + DB, sole writer; embeds off the writer thread; serves the dashboard (axum + SSE) |
 | `crates/mcp` | `rmcp` MCP server (recall / remember / context / list) |
-| `crates/hook` | `memeora-hook` multi-host command-hook binary |
-| `crates/cli` | `memeora` CLI (doctor / add / ingest / recall / context / list / forget / scope / dashboard) |
+| `crates/hook` | `memeora-hook` descriptor-driven command-hook binary (lib + bin) |
+| `crates/cli` | `memeora` CLI (doctor / add / ingest / recall / context / list / forget / scope / dashboard / adapter) |
 | `dashboard/` | Svelte 5 + Vite + Sigma.js graph UI, embedded into the daemon via `rust-embed` |
+| `sdk/ts/` | `@memeora/client` — TypeScript client over the IPC protocol |
+| `adapters/_descriptors/` | data-driven host descriptors (claude / codex / antigravity) |
 
 ## Build
 ```sh
@@ -69,7 +78,8 @@ Toolchain is pinned in `rust-toolchain.toml` (Rust 1.95, edition 2024).
 
 ## Contributing
 See [`CONTRIBUTING.md`](CONTRIBUTING.md). Adding support for a new harness is designed to be easy —
-often just a host-descriptor file.
+often just a host-descriptor file: see [`docs/ADAPTERS.md`](docs/ADAPTERS.md) and run
+`memeora adapter new <harness>`.
 
 ## License
 Dual-licensed under [MIT](LICENSE-MIT) OR [Apache-2.0](LICENSE-APACHE).

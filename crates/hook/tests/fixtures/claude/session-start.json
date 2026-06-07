@@ -1,0 +1,10 @@
+{
+  "host": "claude",
+  "event": "session-start",
+  "payload": { "hook_event_name": "SessionStart", "cwd": "/home/u/proj" },
+  "expect": {
+    "scope_dir": "/home/u/proj",
+    "should_inject": true,
+    "inject_contains": "additionalContext"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "host": "codex",
+  "event": "stop",
+  "payload": { "cwd": "/w/repo", "transcript_path": "/w/repo/.codex/sessions/t.jsonl" },
+  "expect": {
+    "transcript_path": "/w/repo/.codex/sessions/t.jsonl",
+    "ack_json": {}
+  }
+}

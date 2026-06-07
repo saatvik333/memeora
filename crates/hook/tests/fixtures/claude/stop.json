@@ -1,0 +1,9 @@
+{
+  "host": "claude",
+  "event": "stop",
+  "payload": { "cwd": "/home/u/proj", "transcript_path": "/home/u/.claude/projects/proj/t.jsonl" },
+  "expect": {
+    "transcript_path": "/home/u/.claude/projects/proj/t.jsonl",
+    "ack_json": {}
+  }
+}

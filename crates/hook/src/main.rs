@@ -1,52 +1,43 @@
 //! `memeora-hook` — one binary invoked by AI coding tools' command-hooks.
 //!
-//! `--host` selects per-tool conventions (a parser for the stdin payload and a
-//! renderer for stdout), because the hosts do *not* share an event schema:
-//!
-//! - **claude / codex** share a snake_case payload, inject context at
-//!   `SessionStart` via `hookSpecificOutput.additionalContext`, and capture the
-//!   transcript at `Stop`/`PreCompact` (Codex requires JSON on stdout, so we ack
-//!   with `{}`).
-//! - **antigravity** uses its own camelCase schema: there is no session-start
-//!   event, so context is injected at `PreInvocation` (gated to the first
-//!   invocation) via `injectSteps`, scope comes from `workspacePaths`, the
-//!   transcript path is `transcriptPath`, and `Stop` must return a `decision`.
+//! Host-specific behavior is **data**, not code: `--host <name>` selects a built-in
+//! [`HostDescriptor`] (claude / codex / antigravity) and `--descriptor <path>`
+//! loads a community one. The descriptor says how to read the scope and transcript
+//! from the stdin payload and how to render injection / the capture ack — so adding
+//! a command-hook harness is a TOML file (see `docs/ADAPTERS.md`), not a rebuild.
 //!
 //! Everything is best-effort: if the daemon is down the hook stays silent rather
-//! than disrupting the host. Payloads are parsed defensively and should be
-//! validated against real per-host fixtures before relying on them.
+//! than disrupting the host, and a stdin read failure never makes it exit non-zero.
 
 use std::error::Error;
 use std::io::Read;
+use std::path::PathBuf;
 
 use clap::{Parser, ValueEnum};
 use memeora_client::Client;
-use memeora_core::container_tag::project_tag;
+use memeora_hook::descriptor::{self, HostDescriptor};
+use memeora_hook::{
+    capture_ack, format_context, redact, render_inject, resolve_scope, should_inject,
+    transcript_path, transcript_to_text,
+};
 use memeora_proto::DEFAULT_SOCKET;
 use serde_json::Value;
 
 #[derive(Parser)]
 #[command(name = "memeora-hook", version, about = "memeora command-hook adapter")]
 struct Args {
-    /// Which host invoked the hook (selects the payload/render conventions).
-    #[arg(long, value_enum)]
-    host: Host,
+    /// Built-in host (claude | codex | antigravity). Selects its descriptor.
+    #[arg(long)]
+    host: Option<String>,
+    /// Path to a custom host-descriptor TOML (overrides `--host`).
+    #[arg(long)]
+    descriptor: Option<PathBuf>,
     /// Which lifecycle event this invocation handles.
     #[arg(long, value_enum)]
     event: Event,
     /// Daemon socket name/path (defaults to the built-in name).
     #[arg(long)]
     socket: Option<String>,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum Host {
-    /// Claude Code — snake_case payload, `hookSpecificOutput.additionalContext`.
-    Claude,
-    /// OpenAI Codex — same payload/inject format as Claude.
-    Codex,
-    /// Google Antigravity — camelCase payload, `injectSteps`, `decision`.
-    Antigravity,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -61,110 +52,68 @@ enum Event {
     PreCompact,
 }
 
+impl Event {
+    /// Inject events fetch+render context; capture events read the transcript.
+    fn is_inject(self) -> bool {
+        matches!(self, Event::SessionStart | Event::PreInvocation)
+    }
+}
+
+/// Resolve the descriptor from `--descriptor` (a file) or `--host` (a built-in).
+fn resolve_descriptor(args: &Args) -> Result<HostDescriptor, Box<dyn Error>> {
+    if let Some(path) = &args.descriptor {
+        return Ok(descriptor::load(path)?);
+    }
+    if let Some(host) = &args.host {
+        return descriptor::builtin(host).ok_or_else(|| {
+            format!(
+                "unknown built-in host {host:?} (known: {}); pass --descriptor <path> for a custom host",
+                descriptor::BUILTIN_HOSTS.join(", ")
+            )
+            .into()
+        });
+    }
+    Err("one of --host or --descriptor is required".into())
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
+    let desc = resolve_descriptor(&args)?;
 
-    // Read stdin best-effort: a read failure (broken pipe, non-UTF-8) must not make
-    // the hook exit non-zero, which some hosts treat as a hard error.
+    // Read stdin best-effort: a failure (broken pipe, non-UTF-8) must not make the
+    // hook exit non-zero, which some hosts treat as a hard error.
     let mut input = String::new();
     let _ = std::io::stdin().read_to_string(&mut input);
     let payload: Value = serde_json::from_str(&input).unwrap_or(Value::Null);
 
-    let scope = scope_from_payload(args.host, &payload);
+    let scope = resolve_scope(&desc, &payload);
     let socket = args.socket.unwrap_or_else(|| DEFAULT_SOCKET.to_string());
 
-    match args.event {
-        Event::SessionStart | Event::PreInvocation => {
-            if should_inject(args.event, &payload)
-                && let Some(context) = fetch_context(&socket, &scope)
-            {
-                print!("{}", render_inject(args.host, &context));
-            }
+    if args.event.is_inject() {
+        if should_inject(&desc, &payload)
+            && let Some(context) = fetch_context(&socket, &scope)
+        {
+            print!("{}", render_inject(&desc, &context));
         }
-        Event::Stop | Event::PreCompact => {
-            capture(&socket, &scope, args.host, &payload);
-            if let Some(ack) = capture_ack(args.host) {
-                print!("{ack}");
-            }
+    } else {
+        capture(&socket, &scope, &desc, &payload);
+        if let Some(ack) = capture_ack(&desc) {
+            print!("{ack}");
         }
     }
     Ok(())
-}
-
-/// Whether an inject event should actually inject. Antigravity's `PreInvocation`
-/// fires before *every* model call, so we only inject on the first one; the
-/// session-start events fire once and always inject.
-fn should_inject(event: Event, payload: &Value) -> bool {
-    match event {
-        Event::PreInvocation => payload
-            .get("invocationNum")
-            .and_then(Value::as_u64)
-            .map(|n| n == 1)
-            .unwrap_or(true),
-        _ => true,
-    }
-}
-
-/// Determine the project scope from the payload, then the process cwd. Claude and
-/// Codex carry `cwd`; Antigravity carries `workspacePaths` (first entry).
-fn scope_from_payload(host: Host, payload: &Value) -> String {
-    let from_host = match host {
-        Host::Antigravity => payload
-            .get("workspacePaths")
-            .and_then(Value::as_array)
-            .and_then(|a| a.first())
-            .and_then(Value::as_str)
-            .map(String::from),
-        Host::Claude | Host::Codex => payload.get("cwd").and_then(Value::as_str).map(String::from),
-    };
-    let cwd = from_host
-        // Fall back to the other convention, then the process cwd.
-        .or_else(|| payload.get("cwd").and_then(Value::as_str).map(String::from))
-        .or_else(|| {
-            std::env::current_dir()
-                .ok()
-                .map(|p| p.display().to_string())
-        })
-        .unwrap_or_default();
-    project_tag(&cwd)
 }
 
 /// Fetch a scope's profile as injectable text, or `None` if empty/unreachable.
 fn fetch_context(socket: &str, scope: &str) -> Option<String> {
     let mut client = Client::connect(socket).ok()?;
     let (statics, dynamics) = client.context(scope).ok()?;
-    if statics.is_empty() && dynamics.is_empty() {
-        return None;
-    }
-    let mut out = String::from(
-        "The following is persistent memory about this user/project. Use it naturally; don't force it.\n",
-    );
-    for m in statics.iter().chain(dynamics.iter()) {
-        out.push_str(&format!("- [{}] {}\n", m.kind, m.content));
-    }
-    Some(out)
-}
-
-/// Render a context injection in the host's expected stdout format.
-fn render_inject(host: Host, context: &str) -> String {
-    match host {
-        Host::Antigravity => serde_json::json!({
-            "injectSteps": [ { "userMessage": context } ],
-        })
-        .to_string(),
-        Host::Claude | Host::Codex => serde_json::json!({
-            "hookSpecificOutput": {
-                "hookEventName": "SessionStart",
-                "additionalContext": context,
-            }
-        })
-        .to_string(),
-    }
+    format_context(&statics, &dynamics)
 }
 
 /// Capture the host's transcript into memory (best-effort; daemon errors ignored).
-fn capture(socket: &str, scope: &str, host: Host, payload: &Value) {
-    let Some(path) = transcript_path(host, payload) else {
+fn capture(socket: &str, scope: &str, desc: &HostDescriptor, payload: &Value) {
+    let Some(path) = transcript_path(desc, payload) else {
         return;
     };
     let Ok(jsonl) = std::fs::read_to_string(&path) else {
@@ -178,276 +127,4 @@ fn capture(socket: &str, scope: &str, host: Host, payload: &Value) {
         c.ingest(scope, &text)?;
         Ok(())
     });
-}
-
-/// Best-effort redaction of obvious secrets before a transcript is persisted.
-///
-/// Conservative and heuristic (not a substitute for the user not pasting secrets):
-/// masks known credential-prefixed tokens, `key=value`/`key: value` pairs with a
-/// sensitive key, and long high-entropy blobs.
-fn redact(text: &str) -> String {
-    text.lines()
-        .map(|line| {
-            line.split(' ')
-                .map(redact_word)
-                .collect::<Vec<_>>()
-                .join(" ")
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// Sensitive key substrings for `key=value` redaction.
-const SENSITIVE_KEYS: &[&str] = &[
-    "password",
-    "passwd",
-    "secret",
-    "token",
-    "api_key",
-    "apikey",
-    "access_key",
-    "auth",
-];
-
-/// Known secret token prefixes (GitHub, OpenAI, AWS, Google, Slack, GitLab).
-const SECRET_PREFIXES: &[&str] = &[
-    "sk-",
-    "ghp_",
-    "gho_",
-    "ghu_",
-    "ghs_",
-    "github_pat_",
-    "xoxb-",
-    "xoxp-",
-    "AKIA",
-    "AIza",
-    "glpat-",
-];
-
-/// Redact a single whitespace-delimited word, preserving non-secret text.
-fn redact_word(word: &str) -> String {
-    // `key=value` / `key: value` with a sensitive key → mask only the value.
-    if let Some(idx) = word.find(['=', ':']) {
-        let (key, rest) = word.split_at(idx);
-        let value = &rest[1..];
-        let key_lower = key.to_ascii_lowercase();
-        if !value.is_empty() && SENSITIVE_KEYS.iter().any(|s| key_lower.contains(s)) {
-            return format!("{key}{}[REDACTED]", &rest[..1]);
-        }
-    }
-    if looks_secret(word) {
-        return "[REDACTED]".to_string();
-    }
-    word.to_string()
-}
-
-/// Whether a standalone token looks like a credential.
-fn looks_secret(word: &str) -> bool {
-    if SECRET_PREFIXES.iter().any(|p| word.starts_with(p)) {
-        return true;
-    }
-    // Long, high-entropy blob: base64/hex-ish with both letters and digits.
-    word.len() >= 32
-        && word
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "-_+/=.".contains(c))
-        && word.chars().any(|c| c.is_ascii_alphabetic())
-        && word.chars().any(|c| c.is_ascii_digit())
-}
-
-/// The transcript path field for the host (with a defensive fallback to the
-/// other naming convention).
-fn transcript_path(host: Host, payload: &Value) -> Option<String> {
-    let primary = match host {
-        Host::Antigravity => "transcriptPath",
-        Host::Claude | Host::Codex => "transcript_path",
-    };
-    payload
-        .get(primary)
-        .and_then(Value::as_str)
-        .or_else(|| payload.get("transcript_path").and_then(Value::as_str))
-        .or_else(|| payload.get("transcriptPath").and_then(Value::as_str))
-        .map(String::from)
-}
-
-/// Stdout a capture event must emit, if the host requires valid JSON even when
-/// the hook only has side effects.
-fn capture_ack(host: Host) -> Option<String> {
-    match host {
-        // Antigravity's `Stop` requires a `decision`; any value other than
-        // "continue" lets the turn end normally. (Verify against a fixture.)
-        Host::Antigravity => Some(r#"{"decision":"stop"}"#.to_string()),
-        // Codex rejects non-JSON stdout from `Stop`; Claude tolerates `{}`.
-        Host::Claude | Host::Codex => Some("{}".to_string()),
-    }
-}
-
-/// Extract the last `max_turns` user/assistant turns from a transcript JSONL into
-/// compact `role: text` lines. Defensive: unknown lines/shapes are skipped.
-fn transcript_to_text(jsonl: &str, max_turns: usize) -> String {
-    let mut turns = Vec::new();
-    for line in jsonl.lines() {
-        let Ok(value) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        let role = value
-            .get("message")
-            .and_then(|m| m.get("role"))
-            .and_then(Value::as_str)
-            .or_else(|| value.get("role").and_then(Value::as_str));
-        let Some(role) = role else { continue };
-        if role != "user" && role != "assistant" {
-            continue;
-        }
-        let text = extract_text(&value);
-        if text.trim().is_empty() {
-            continue;
-        }
-        turns.push(format!("{role}: {text}"));
-    }
-    let start = turns.len().saturating_sub(max_turns);
-    turns[start..].join("\n")
-}
-
-/// Pull text from a transcript entry: `message.content` (or `content`) as a string
-/// or an array of `{text: ...}` content blocks.
-fn extract_text(value: &Value) -> String {
-    let content = value
-        .get("message")
-        .and_then(|m| m.get("content"))
-        .or_else(|| value.get("content"));
-    match content {
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Array(blocks)) => blocks
-            .iter()
-            // Only plain text blocks — skip tool_use/tool_result/thinking, which
-            // aren't conversation and can leak tool output into memory.
-            .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
-            .filter_map(|b| b.get("text").and_then(Value::as_str))
-            .collect::<Vec<_>>()
-            .join(" "),
-        _ => String::new(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn scope_uses_cwd_for_claude() {
-        let payload = serde_json::json!({ "cwd": "/home/u/proj" });
-        assert_eq!(
-            scope_from_payload(Host::Claude, &payload),
-            project_tag("/home/u/proj")
-        );
-    }
-
-    #[test]
-    fn scope_uses_workspace_paths_for_antigravity() {
-        let payload = serde_json::json!({ "workspacePaths": ["/home/u/proj", "/tmp/x"] });
-        assert_eq!(
-            scope_from_payload(Host::Antigravity, &payload),
-            project_tag("/home/u/proj")
-        );
-    }
-
-    #[test]
-    fn claude_injection_has_additional_context() {
-        let out = render_inject(Host::Claude, "hello memory");
-        let v: Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(v["hookSpecificOutput"]["hookEventName"], "SessionStart");
-        assert_eq!(v["hookSpecificOutput"]["additionalContext"], "hello memory");
-    }
-
-    #[test]
-    fn antigravity_injection_uses_inject_steps() {
-        let out = render_inject(Host::Antigravity, "hello memory");
-        let v: Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(v["injectSteps"][0]["userMessage"], "hello memory");
-    }
-
-    #[test]
-    fn pre_invocation_injects_only_on_first() {
-        assert!(should_inject(
-            Event::PreInvocation,
-            &serde_json::json!({ "invocationNum": 1 })
-        ));
-        assert!(!should_inject(
-            Event::PreInvocation,
-            &serde_json::json!({ "invocationNum": 2 })
-        ));
-        // Missing field → default to injecting.
-        assert!(should_inject(Event::PreInvocation, &serde_json::json!({})));
-        // Session-start always injects.
-        assert!(should_inject(Event::SessionStart, &serde_json::json!({})));
-    }
-
-    #[test]
-    fn antigravity_uses_camel_case_transcript_path() {
-        let payload = serde_json::json!({ "transcriptPath": "/t/a.jsonl" });
-        assert_eq!(
-            transcript_path(Host::Antigravity, &payload).as_deref(),
-            Some("/t/a.jsonl")
-        );
-    }
-
-    #[test]
-    fn capture_ack_is_valid_json_per_host() {
-        let anti: Value = serde_json::from_str(&capture_ack(Host::Antigravity).unwrap()).unwrap();
-        assert_eq!(anti["decision"], "stop");
-        let codex: Value = serde_json::from_str(&capture_ack(Host::Codex).unwrap()).unwrap();
-        assert!(codex.is_object());
-    }
-
-    #[test]
-    fn transcript_extracts_roles_and_text() {
-        let jsonl = [
-            r#"{"message":{"role":"user","content":"I prefer rust"}}"#,
-            r#"{"message":{"role":"assistant","content":[{"type":"text","text":"noted"}]}}"#,
-            r#"{"type":"system","message":{"role":"system","content":"ignore me"}}"#,
-            r#"not json"#,
-        ]
-        .join("\n");
-        let text = transcript_to_text(&jsonl, 40);
-        assert_eq!(text, "user: I prefer rust\nassistant: noted");
-    }
-
-    #[test]
-    fn redact_masks_secrets_but_keeps_prose() {
-        let out = redact("deploy with key sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ012345 today");
-        assert!(out.contains("[REDACTED]"));
-        assert!(out.contains("deploy with key"));
-        assert!(out.contains("today"));
-        assert!(!out.contains("sk-ABCDEFG"));
-
-        // key=value with a sensitive key masks only the value.
-        let kv = redact("set password=hunter2supersecret in config");
-        assert!(kv.contains("password=[REDACTED]"));
-        assert!(kv.contains("in config"));
-
-        // Ordinary text is untouched.
-        assert_eq!(redact("I prefer dark mode"), "I prefer dark mode");
-    }
-
-    #[test]
-    fn extract_text_skips_non_text_blocks() {
-        let value = serde_json::json!({
-            "message": { "role": "assistant", "content": [
-                { "type": "text", "text": "hello" },
-                { "type": "tool_use", "text": "secret tool input" },
-                { "type": "tool_result", "text": "file dump" },
-            ]}
-        });
-        assert_eq!(extract_text(&value), "hello");
-    }
-
-    #[test]
-    fn transcript_keeps_only_last_n_turns() {
-        let lines: Vec<String> = (0..10)
-            .map(|i| format!(r#"{{"role":"user","content":"m{i}"}}"#))
-            .collect();
-        let text = transcript_to_text(&lines.join("\n"), 3);
-        assert_eq!(text, "user: m7\nuser: m8\nuser: m9");
-    }
 }

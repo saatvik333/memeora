@@ -1,0 +1,10 @@
+{
+  "host": "codex",
+  "event": "session-start",
+  "payload": { "cwd": "/w/repo" },
+  "expect": {
+    "scope_dir": "/w/repo",
+    "should_inject": true,
+    "inject_contains": "additionalContext"
+  }
+}

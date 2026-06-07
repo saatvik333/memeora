@@ -206,6 +206,10 @@ impl Engine {
             Prepared::Hello => Response::Hello {
                 protocol_version: PROTOCOL_VERSION,
                 server_version: env!("CARGO_PKG_VERSION").to_string(),
+                capabilities: memeora_proto::capability::ALL
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
             },
 
             Prepared::Ingest { scope, candidates } => {

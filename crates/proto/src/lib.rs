@@ -11,8 +11,35 @@ use serde::{Deserialize, Serialize};
 
 pub mod frame;
 
-/// Wire protocol version. Bumped on breaking changes to the IPC contract.
+/// Wire protocol version. Bumped only on **breaking** changes to the IPC contract.
+///
+/// Additive changes (a new optional field, a new capability string, a new request
+/// variant a server may ignore) do *not* bump this — see `docs/PROTOCOL.md` for the
+/// stability policy. Clients gate optional behavior on [`capabilities`](Response::Hello)
+/// rather than the version number.
 pub const PROTOCOL_VERSION: u32 = 1;
+
+/// Capability tokens a daemon advertises in its [`Response::Hello`], so clients can
+/// negotiate optional features without bumping [`PROTOCOL_VERSION`]. The set is the
+/// daemon's supported operations; future optional features append new tokens here.
+pub mod capability {
+    /// Ingest raw text ([`Request::Ingest`]).
+    pub const INGEST: &str = "ingest";
+    /// Add an explicit memory ([`Request::Add`]).
+    pub const ADD: &str = "add";
+    /// Hybrid recall ([`Request::Recall`]).
+    pub const RECALL: &str = "recall";
+    /// Profile/context ([`Request::Context`]).
+    pub const CONTEXT: &str = "context";
+    /// List memories ([`Request::List`]).
+    pub const LIST: &str = "list";
+    /// Soft-forget ([`Request::Forget`]).
+    pub const FORGET: &str = "forget";
+
+    /// The full set a current daemon supports. Returned by the daemon in its
+    /// handshake; kept here so client and server agree on the canonical list.
+    pub const ALL: &[&str] = &[INGEST, ADD, RECALL, CONTEXT, LIST, FORGET];
+}
 
 /// Build a local-socket [`Name`] from a string: a value containing a path
 /// separator is a filesystem socket path; otherwise a namespaced name.
@@ -96,12 +123,17 @@ pub enum Request {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Response {
-    /// Handshake reply with the daemon's versions.
+    /// Handshake reply with the daemon's versions and capabilities.
     Hello {
         /// Daemon's [`PROTOCOL_VERSION`].
         protocol_version: u32,
         /// Daemon crate version (semver).
         server_version: String,
+        /// Operations/features this daemon supports (see [`capability`]). Defaults
+        /// to empty when absent so a newer client still parses an older daemon's
+        /// handshake — capability negotiation never breaks the wire format.
+        #[serde(default)]
+        capabilities: Vec<String>,
     },
     /// Result of an [`Request::Ingest`].
     Ingested {
@@ -209,6 +241,41 @@ mod tests {
     fn request_uses_op_discriminator() {
         let json = serde_json::to_string(&Request::Context { scope: "s".into() }).unwrap();
         assert!(json.contains("\"op\":\"context\""), "got: {json}");
+    }
+
+    #[test]
+    fn hello_without_capabilities_is_back_compatible() {
+        // An older daemon's handshake (no `capabilities` field) must still parse,
+        // defaulting to an empty set — additive changes never break the wire format.
+        let json = r#"{"type":"hello","protocol_version":1,"server_version":"0.0.0"}"#;
+        let resp: Response = serde_json::from_str(json).unwrap();
+        match resp {
+            Response::Hello {
+                protocol_version,
+                capabilities,
+                ..
+            } => {
+                assert_eq!(protocol_version, 1);
+                assert!(capabilities.is_empty());
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn capability_set_is_nonempty_and_roundtrips() {
+        assert!(!capability::ALL.is_empty());
+        let resp = Response::Hello {
+            protocol_version: PROTOCOL_VERSION,
+            server_version: "0.0.0".into(),
+            capabilities: capability::ALL.iter().map(|s| s.to_string()).collect(),
+        };
+        match roundtrip_response(&resp) {
+            Response::Hello { capabilities, .. } => {
+                assert!(capabilities.iter().any(|c| c == capability::RECALL));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
     }
 
     #[test]

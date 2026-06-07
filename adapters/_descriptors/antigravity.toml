@@ -1,0 +1,18 @@
+# memeora host descriptor — Google Antigravity.
+#
+# Antigravity uses its own camelCase schema: no session-start event (inject at the
+# first PreInvocation), scope from workspacePaths, camelCase transcriptPath, and a
+# Stop that must return a decision. See docs/ADAPTERS.md.
+name = "antigravity"
+
+# First workspace path, falling back to cwd.
+scope_fields = ["workspacePaths.0", "cwd"]
+transcript_fields = ["transcriptPath", "transcript_path"]
+
+inject_style = "inject_steps"
+
+# Stop requires a decision; anything but "continue" lets the turn end normally.
+capture_ack = '{"decision":"stop"}'
+
+# PreInvocation fires before every model call — inject only when this field == 1.
+invocation_gate_field = "invocationNum"

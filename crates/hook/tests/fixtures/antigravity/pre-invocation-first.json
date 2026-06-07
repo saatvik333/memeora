@@ -1,0 +1,10 @@
+{
+  "host": "antigravity",
+  "event": "pre-invocation",
+  "payload": { "workspacePaths": ["/ws/a", "/ws/b"], "invocationNum": 1 },
+  "expect": {
+    "scope_dir": "/ws/a",
+    "should_inject": true,
+    "inject_contains": "injectSteps"
+  }
+}
