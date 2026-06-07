@@ -8,6 +8,7 @@ use std::error::Error;
 
 use clap::{Parser, Subcommand};
 use memeora_client::Client;
+use memeora_core::container_tag::project_tag;
 use memeora_proto::DEFAULT_SOCKET;
 
 #[derive(Parser)]
@@ -69,10 +70,29 @@ enum Command {
         /// Memory id.
         id: String,
     },
+    /// Print the project container tag for a path (defaults to the cwd).
+    ///
+    /// Daemon-free: lets adapters (e.g. the OpenCode shim) resolve the same
+    /// scope the hook uses without reimplementing the hashing.
+    Scope {
+        /// Path to scope (defaults to the current directory).
+        path: Option<String>,
+    },
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
+
+    // `scope` is a pure local computation — handle it before touching the daemon.
+    if let Command::Scope { path } = &cli.command {
+        let path = match path {
+            Some(p) => p.clone(),
+            None => std::env::current_dir()?.display().to_string(),
+        };
+        println!("{}", project_tag(&path));
+        return Ok(());
+    }
+
     let socket = cli.socket.unwrap_or_else(|| DEFAULT_SOCKET.to_string());
     let mut client = Client::connect(&socket).map_err(|e| {
         format!("cannot reach the daemon at {socket}: {e}\nis `memeora-daemon` running?")
@@ -121,6 +141,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             client.forget(&id)?;
             println!("forgotten {id}");
         }
+        // Handled above before the daemon connection.
+        Command::Scope { .. } => unreachable!("scope is resolved before connecting"),
     }
     Ok(())
 }

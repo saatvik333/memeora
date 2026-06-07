@@ -1,0 +1,20 @@
+{
+  "name": "@memeora/opencode",
+  "version": "0.1.0",
+  "description": "OpenCode plugin for memeora — persistent local memory (recall/remember/context) over the memeora daemon.",
+  "license": "MIT OR Apache-2.0",
+  "type": "module",
+  "main": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "keywords": ["opencode", "plugin", "memory", "memeora", "local-first"],
+  "homepage": "https://github.com/saatvik333/memeora",
+  "peerDependencies": {
+    "@opencode-ai/plugin": "*"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "latest",
+    "typescript": "^5"
+  }
+}

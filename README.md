@@ -6,7 +6,8 @@ memeora gives your AI coding tools **persistent memory** — it learns facts fro
 builds a knowledge graph, and recalls the right context at the right time. It's a free,
 **local-first**, open alternative to hosted memory APIs: **no required LLM, no API key, works offline.**
 
-> **Status:** Steps 1–6 implemented — the engine and its surfaces are end-to-end:
+> **Status:** Steps 1–7 implemented — the engine, its surfaces, and per-tool
+> packaging are end-to-end:
 > - **Engine (`crates/core`):** SQLite + statically-linked `sqlite-vec` KNN + FTS5 behind the
 >   `VectorStore` trait (container-tag scoping, soft-forget); `EmbeddingProvider` with a
 >   content-hash cache and a local `fastembed` backend; hybrid retrieval (dense + BM25 fused
@@ -17,11 +18,15 @@ builds a knowledge graph, and recalls the right context at the right time. It's 
 >   blocking **writer-actor** server over `interprocess`; the daemon binary loads the model + DB
 >   and serves it.
 > - **Surfaces:** `memeora-client` (typed Rust SDK), `memeora-mcp` (rmcp MCP server — recall/
->   remember/context/list over stdio), the `memeora` **CLI**, and `memeora-hook` (Claude/Codex
->   command-hook: session-start injection + Stop capture).
+>   remember/context/list over stdio, **scope defaults to the current project**), the `memeora`
+>   **CLI**, and `memeora-hook` (multi-host command-hook: session-start/`PreInvocation` injection
+>   + `Stop`/`PreCompact` capture for Claude, Codex & Antigravity).
+> - **Adapters ([`adapters/`](adapters/)):** ready-to-install plugin bundles for **Claude Code**
+>   (plugin marketplace), **Codex** (`config.toml` + hooks), **Antigravity** (plugin bundle, own
+>   camelCase schema), and **OpenCode** (thin TS shim — the only non-Rust adapter). All four
+>   share one daemon/DB, so memory is cross-tool by construction.
 >
-> Next: adapters packaging, dashboard, ecosystem, release. See
-> [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+> Next: dashboard, ecosystem, release. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## Highlights
 - **Rust** engine + daemon + MCP server + hook binary + CLI → one self-contained distributable.

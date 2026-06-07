@@ -1691,6 +1691,7 @@ version = "0.0.0"
 dependencies = [
  "clap",
  "memeora-client",
+ "memeora-core",
  "memeora-proto",
 ]
 
@@ -1741,6 +1742,7 @@ name = "memeora-mcp"
 version = "0.0.0"
 dependencies = [
  "memeora-client",
+ "memeora-core",
  "memeora-proto",
  "rmcp",
  "schemars",

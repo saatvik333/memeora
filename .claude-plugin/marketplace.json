@@ -1,0 +1,14 @@
+{
+  "name": "memeora",
+  "owner": {
+    "name": "the memeora authors",
+    "url": "https://github.com/saatvik333/memeora"
+  },
+  "plugins": [
+    {
+      "name": "memeora",
+      "source": "./adapters/claude-code",
+      "description": "Persistent local memory for Claude Code (recall/remember tools + auto-capture)."
+    }
+  ]
+}

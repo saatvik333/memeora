@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "memeora": {
+      "command": "memeora-mcp",
+      "disabled": false
+    }
+  }
+}

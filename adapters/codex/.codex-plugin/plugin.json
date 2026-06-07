@@ -1,0 +1,7 @@
+{
+  "name": "memeora",
+  "version": "0.1.0",
+  "description": "Persistent local memory for Codex — recall/remember tools plus auto-capture, served by the memeora daemon.",
+  "mcpServers": "./.mcp.json",
+  "hooks": "./hooks/hooks.json"
+}

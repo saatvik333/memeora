@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "memeora-hook --host antigravity --event pre-invocation"
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "memeora-hook --host antigravity --event stop"
+      }
+    ]
+  }
+}

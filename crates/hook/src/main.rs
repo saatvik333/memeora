@@ -1,15 +1,20 @@
 //! `memeora-hook` — one binary invoked by AI coding tools' command-hooks.
 //!
-//! `--host` selects the per-tool conventions; Claude Code and Codex share the
-//! `SessionStart.additionalContext` injection format and a turn-end `Stop` event,
-//! so they take the same path here. The hook reads the host's JSON payload on
-//! stdin and:
-//! - **session-start** → injects the scope's profile as `additionalContext`;
-//! - **stop** → captures the transcript into memory (best-effort, async upstream).
+//! `--host` selects per-tool conventions (a parser for the stdin payload and a
+//! renderer for stdout), because the hosts do *not* share an event schema:
 //!
-//! Everything here is best-effort: if the daemon is down, the hook stays silent
-//! rather than disrupting the host. The transcript schema is parsed defensively
-//! and should be validated against real per-host fixtures before relying on it.
+//! - **claude / codex** share a snake_case payload, inject context at
+//!   `SessionStart` via `hookSpecificOutput.additionalContext`, and capture the
+//!   transcript at `Stop`/`PreCompact` (Codex requires JSON on stdout, so we ack
+//!   with `{}`).
+//! - **antigravity** uses its own camelCase schema: there is no session-start
+//!   event, so context is injected at `PreInvocation` (gated to the first
+//!   invocation) via `injectSteps`, scope comes from `workspacePaths`, the
+//!   transcript path is `transcriptPath`, and `Stop` must return a `decision`.
+//!
+//! Everything is best-effort: if the daemon is down the hook stays silent rather
+//! than disrupting the host. Payloads are parsed defensively and should be
+//! validated against real per-host fixtures before relying on them.
 
 use std::error::Error;
 use std::io::Read;
@@ -23,7 +28,7 @@ use serde_json::Value;
 #[derive(Parser)]
 #[command(name = "memeora-hook", version, about = "memeora command-hook adapter")]
 struct Args {
-    /// Which host invoked the hook.
+    /// Which host invoked the hook (selects the payload/render conventions).
     #[arg(long, value_enum)]
     host: Host,
     /// Which lifecycle event this invocation handles.
@@ -34,59 +39,85 @@ struct Args {
     socket: Option<String>,
 }
 
-#[derive(Clone, Copy, ValueEnum)]
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum Host {
+    /// Claude Code — snake_case payload, `hookSpecificOutput.additionalContext`.
     Claude,
+    /// OpenAI Codex — same payload/inject format as Claude.
     Codex,
+    /// Google Antigravity — camelCase payload, `injectSteps`, `decision`.
+    Antigravity,
 }
 
-#[derive(Clone, Copy, ValueEnum)]
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum Event {
+    /// Claude/Codex session start → inject profile.
     SessionStart,
+    /// Antigravity per-invocation hook → inject profile on the first invocation.
+    PreInvocation,
+    /// Turn end → capture the transcript.
     Stop,
+    /// Before context compaction → capture the transcript (last chance).
+    PreCompact,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
-    let _ = args.host; // Claude & Codex share this path today; reserved for divergence.
 
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input)?;
     let payload: Value = serde_json::from_str(&input).unwrap_or(Value::Null);
 
-    let scope = scope_from_payload(&payload);
+    let scope = scope_from_payload(args.host, &payload);
     let socket = args.socket.unwrap_or_else(|| DEFAULT_SOCKET.to_string());
 
     match args.event {
-        Event::SessionStart => {
-            if let Some(context) = fetch_context(&socket, &scope) {
-                print!("{}", render_session_start(&context));
+        Event::SessionStart | Event::PreInvocation => {
+            if should_inject(args.event, &payload)
+                && let Some(context) = fetch_context(&socket, &scope)
+            {
+                print!("{}", render_inject(args.host, &context));
             }
         }
-        Event::Stop => {
-            if let Some(path) = payload.get("transcript_path").and_then(Value::as_str)
-                && let Ok(jsonl) = std::fs::read_to_string(path)
-            {
-                let text = transcript_to_text(&jsonl, 40);
-                if !text.trim().is_empty() {
-                    // Best-effort capture; ignore daemon errors.
-                    let _ = Client::connect(&socket).and_then(|mut c| {
-                        c.ingest(&scope, &text)?;
-                        Ok(())
-                    });
-                }
+        Event::Stop | Event::PreCompact => {
+            capture(&socket, &scope, args.host, &payload);
+            if let Some(ack) = capture_ack(args.host) {
+                print!("{ack}");
             }
         }
     }
     Ok(())
 }
 
-/// Determine the project scope from the payload's `cwd` (or the process cwd).
-fn scope_from_payload(payload: &Value) -> String {
-    let cwd = payload
-        .get("cwd")
-        .and_then(Value::as_str)
-        .map(String::from)
+/// Whether an inject event should actually inject. Antigravity's `PreInvocation`
+/// fires before *every* model call, so we only inject on the first one; the
+/// session-start events fire once and always inject.
+fn should_inject(event: Event, payload: &Value) -> bool {
+    match event {
+        Event::PreInvocation => payload
+            .get("invocationNum")
+            .and_then(Value::as_u64)
+            .map(|n| n == 1)
+            .unwrap_or(true),
+        _ => true,
+    }
+}
+
+/// Determine the project scope from the payload, then the process cwd. Claude and
+/// Codex carry `cwd`; Antigravity carries `workspacePaths` (first entry).
+fn scope_from_payload(host: Host, payload: &Value) -> String {
+    let from_host = match host {
+        Host::Antigravity => payload
+            .get("workspacePaths")
+            .and_then(Value::as_array)
+            .and_then(|a| a.first())
+            .and_then(Value::as_str)
+            .map(String::from),
+        Host::Claude | Host::Codex => payload.get("cwd").and_then(Value::as_str).map(String::from),
+    };
+    let cwd = from_host
+        // Fall back to the other convention, then the process cwd.
+        .or_else(|| payload.get("cwd").and_then(Value::as_str).map(String::from))
         .or_else(|| {
             std::env::current_dir()
                 .ok()
@@ -112,15 +143,66 @@ fn fetch_context(socket: &str, scope: &str) -> Option<String> {
     Some(out)
 }
 
-/// Render the host's session-start context injection (Claude/Codex shared format).
-fn render_session_start(context: &str) -> String {
-    serde_json::json!({
-        "hookSpecificOutput": {
-            "hookEventName": "SessionStart",
-            "additionalContext": context,
-        }
-    })
-    .to_string()
+/// Render a context injection in the host's expected stdout format.
+fn render_inject(host: Host, context: &str) -> String {
+    match host {
+        Host::Antigravity => serde_json::json!({
+            "injectSteps": [ { "userMessage": context } ],
+        })
+        .to_string(),
+        Host::Claude | Host::Codex => serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "SessionStart",
+                "additionalContext": context,
+            }
+        })
+        .to_string(),
+    }
+}
+
+/// Capture the host's transcript into memory (best-effort; daemon errors ignored).
+fn capture(socket: &str, scope: &str, host: Host, payload: &Value) {
+    let Some(path) = transcript_path(host, payload) else {
+        return;
+    };
+    let Ok(jsonl) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let text = transcript_to_text(&jsonl, 40);
+    if text.trim().is_empty() {
+        return;
+    }
+    let _ = Client::connect(socket).and_then(|mut c| {
+        c.ingest(scope, &text)?;
+        Ok(())
+    });
+}
+
+/// The transcript path field for the host (with a defensive fallback to the
+/// other naming convention).
+fn transcript_path(host: Host, payload: &Value) -> Option<String> {
+    let primary = match host {
+        Host::Antigravity => "transcriptPath",
+        Host::Claude | Host::Codex => "transcript_path",
+    };
+    payload
+        .get(primary)
+        .and_then(Value::as_str)
+        .or_else(|| payload.get("transcript_path").and_then(Value::as_str))
+        .or_else(|| payload.get("transcriptPath").and_then(Value::as_str))
+        .map(String::from)
+}
+
+/// Stdout a capture event must emit, if the host requires valid JSON even when
+/// the hook only has side effects.
+fn capture_ack(host: Host) -> Option<String> {
+    match host {
+        // Antigravity's `Stop` requires a `decision`; any value other than
+        // "continue" lets the turn end normally. (Verify against a fixture.)
+        Host::Antigravity => Some(r#"{"decision":"stop"}"#.to_string()),
+        // Codex rejects non-JSON stdout from `Stop`; Claude tolerates `{}`.
+        Host::Claude | Host::Codex => Some("{}".to_string()),
+    }
 }
 
 /// Extract the last `max_turns` user/assistant turns from a transcript JSONL into
@@ -173,17 +255,69 @@ mod tests {
     use super::*;
 
     #[test]
-    fn scope_uses_cwd_from_payload() {
+    fn scope_uses_cwd_for_claude() {
         let payload = serde_json::json!({ "cwd": "/home/u/proj" });
-        assert_eq!(scope_from_payload(&payload), project_tag("/home/u/proj"));
+        assert_eq!(
+            scope_from_payload(Host::Claude, &payload),
+            project_tag("/home/u/proj")
+        );
     }
 
     #[test]
-    fn session_start_injection_has_additional_context() {
-        let out = render_session_start("hello memory");
+    fn scope_uses_workspace_paths_for_antigravity() {
+        let payload = serde_json::json!({ "workspacePaths": ["/home/u/proj", "/tmp/x"] });
+        assert_eq!(
+            scope_from_payload(Host::Antigravity, &payload),
+            project_tag("/home/u/proj")
+        );
+    }
+
+    #[test]
+    fn claude_injection_has_additional_context() {
+        let out = render_inject(Host::Claude, "hello memory");
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["hookSpecificOutput"]["hookEventName"], "SessionStart");
         assert_eq!(v["hookSpecificOutput"]["additionalContext"], "hello memory");
+    }
+
+    #[test]
+    fn antigravity_injection_uses_inject_steps() {
+        let out = render_inject(Host::Antigravity, "hello memory");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["injectSteps"][0]["userMessage"], "hello memory");
+    }
+
+    #[test]
+    fn pre_invocation_injects_only_on_first() {
+        assert!(should_inject(
+            Event::PreInvocation,
+            &serde_json::json!({ "invocationNum": 1 })
+        ));
+        assert!(!should_inject(
+            Event::PreInvocation,
+            &serde_json::json!({ "invocationNum": 2 })
+        ));
+        // Missing field → default to injecting.
+        assert!(should_inject(Event::PreInvocation, &serde_json::json!({})));
+        // Session-start always injects.
+        assert!(should_inject(Event::SessionStart, &serde_json::json!({})));
+    }
+
+    #[test]
+    fn antigravity_uses_camel_case_transcript_path() {
+        let payload = serde_json::json!({ "transcriptPath": "/t/a.jsonl" });
+        assert_eq!(
+            transcript_path(Host::Antigravity, &payload).as_deref(),
+            Some("/t/a.jsonl")
+        );
+    }
+
+    #[test]
+    fn capture_ack_is_valid_json_per_host() {
+        let anti: Value = serde_json::from_str(&capture_ack(Host::Antigravity).unwrap()).unwrap();
+        assert_eq!(anti["decision"], "stop");
+        let codex: Value = serde_json::from_str(&capture_ack(Host::Codex).unwrap()).unwrap();
+        assert!(codex.is_object());
     }
 
     #[test]

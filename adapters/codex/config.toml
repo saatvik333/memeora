@@ -1,0 +1,9 @@
+# memeora — Codex MCP server registration.
+#
+# Merge this section into ~/.codex/config.toml (do NOT overwrite the file).
+# The section name is `mcp_servers` (underscore) — Codex silently ignores a
+# hyphenated key.
+
+[mcp_servers.memeora]
+command = "memeora-mcp"
+enabled = true

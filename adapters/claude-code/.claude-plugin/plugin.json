@@ -1,0 +1,11 @@
+{
+  "name": "memeora",
+  "version": "0.1.0",
+  "description": "Persistent local memory for Claude Code — recall/remember tools plus auto-captured session context, served by the memeora daemon. No API key, works offline.",
+  "author": {
+    "name": "the memeora authors",
+    "url": "https://github.com/saatvik333/memeora"
+  },
+  "homepage": "https://github.com/saatvik333/memeora",
+  "keywords": ["memory", "mcp", "hooks", "local-first", "rust"]
+}

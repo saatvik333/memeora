@@ -6,6 +6,7 @@
 //! the result as text. The socket defaults to [`memeora_proto::DEFAULT_SOCKET`].
 
 use memeora_client::Client;
+use memeora_core::container_tag::project_tag;
 use memeora_proto::MemoryDto;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content};
@@ -22,8 +23,8 @@ pub struct MemoryServer {
 /// Arguments for `recall`.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RecallArgs {
-    /// Scope/container tag to search within.
-    pub scope: String,
+    /// Scope/container tag to search within (defaults to the current project).
+    pub scope: Option<String>,
     /// Natural-language query.
     pub query: String,
     /// Maximum number of results (default 10).
@@ -33,8 +34,8 @@ pub struct RecallArgs {
 /// Arguments for `remember`.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RememberArgs {
-    /// Scope/container tag to store under.
-    pub scope: String,
+    /// Scope/container tag to store under (defaults to the current project).
+    pub scope: Option<String>,
     /// The memory content to store.
     pub content: String,
     /// Kind: `fact`, `preference`, or `episode` (default `fact`).
@@ -44,10 +45,26 @@ pub struct RememberArgs {
 /// Arguments for `context` and `list`.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ScopeArgs {
-    /// Scope/container tag.
-    pub scope: String,
+    /// Scope/container tag (defaults to the current project).
+    pub scope: Option<String>,
     /// Max results, for `list` (default 20).
     pub limit: Option<usize>,
+}
+
+/// Resolve a caller-supplied scope to a concrete container tag. An empty or
+/// missing scope defaults to the project tag for the server's working directory,
+/// so MCP tools and the `memeora-hook` capture path agree on the same scope.
+fn resolve_scope(scope: Option<String>) -> String {
+    match scope {
+        Some(s) if !s.trim().is_empty() => s,
+        _ => {
+            let cwd = std::env::current_dir()
+                .ok()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+            project_tag(&cwd)
+        }
+    }
 }
 
 #[tool_router]
@@ -63,8 +80,9 @@ impl MemoryServer {
         Parameters(args): Parameters<RecallArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let socket = self.socket.clone();
+        let scope = resolve_scope(args.scope);
         let memories = blocking(move || {
-            Client::connect(&socket)?.recall(&args.scope, &args.query, args.k.unwrap_or(10))
+            Client::connect(&socket)?.recall(&scope, &args.query, args.k.unwrap_or(10))
         })
         .await?;
         Ok(CallToolResult::success(vec![Content::text(render(
@@ -78,9 +96,10 @@ impl MemoryServer {
         Parameters(args): Parameters<RememberArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let socket = self.socket.clone();
+        let scope = resolve_scope(args.scope);
         let kind = args.kind.unwrap_or_else(|| "fact".to_string());
-        let id = blocking(move || Client::connect(&socket)?.add(&args.scope, &args.content, &kind))
-            .await?;
+        let id =
+            blocking(move || Client::connect(&socket)?.add(&scope, &args.content, &kind)).await?;
         Ok(CallToolResult::success(vec![Content::text(format!(
             "stored memory {id}"
         ))]))
@@ -94,8 +113,9 @@ impl MemoryServer {
         Parameters(args): Parameters<ScopeArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let socket = self.socket.clone();
+        let scope = resolve_scope(args.scope);
         let (statics, dynamics) =
-            blocking(move || Client::connect(&socket)?.context(&args.scope)).await?;
+            blocking(move || Client::connect(&socket)?.context(&scope)).await?;
         let text = format!(
             "## Stable\n{}\n\n## Recent\n{}",
             render(&statics),
@@ -110,8 +130,9 @@ impl MemoryServer {
         Parameters(args): Parameters<ScopeArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let socket = self.socket.clone();
+        let scope = resolve_scope(args.scope);
         let memories =
-            blocking(move || Client::connect(&socket)?.list(&args.scope, args.limit.unwrap_or(20)))
+            blocking(move || Client::connect(&socket)?.list(&scope, args.limit.unwrap_or(20)))
                 .await?;
         Ok(CallToolResult::success(vec![Content::text(render(
             &memories,
@@ -144,4 +165,25 @@ fn render(memories: &[MemoryDto]) -> String {
         .map(|m| format!("- [{}] {}", m.kind, m.content))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_scope_is_passed_through() {
+        assert_eq!(
+            resolve_scope(Some("repo_memeora".into())),
+            "repo_memeora".to_string()
+        );
+    }
+
+    #[test]
+    fn missing_or_blank_scope_falls_back_to_project_tag() {
+        let default = resolve_scope(None);
+        assert!(default.starts_with("memeora_project_"));
+        // Blank strings resolve the same way as a missing scope.
+        assert_eq!(resolve_scope(Some("   ".into())), default);
+    }
 }
