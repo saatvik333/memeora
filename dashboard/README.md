@@ -11,24 +11,24 @@ with `memeora dashboard`.
 ## Develop
 
 ```sh
-pnpm install
-pnpm dev          # Vite dev server; proxies /api to a running daemon
+bun install
+bun run dev       # Vite dev server; proxies /api to a running daemon
 ```
 
-`pnpm dev` proxies `/api/*` to `http://127.0.0.1:7878` (the daemon's default
+`bun run dev` proxies `/api/*` to `http://127.0.0.1:7878` (the daemon's default
 dashboard address — start `memeora-daemon` first). Override the proxy target in
 `vite.config.ts` if you set `MEMEORA_DASHBOARD_ADDR`.
 
 ## Build (embed into the binary)
 
 ```sh
-pnpm install
-pnpm build        # → dist/, which the daemon embeds via rust-embed
+bun install
+bun run build     # → dist/, which the daemon embeds via rust-embed
 cargo build --release -p memeora-daemon
 ```
 
 If `dist/` is absent at compile time the daemon's `build.rs` writes a placeholder
-page, so the Rust build (and CI) never depends on a Node toolchain. Building the
+page, so the Rust build (and CI) never depends on a JS toolchain. Building the
 real UI simply replaces that placeholder.
 
 ## What it shows

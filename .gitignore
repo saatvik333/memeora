@@ -10,9 +10,12 @@ node_modules/
 dist/
 .svelte-kit/
 *.tsbuildinfo
-# dashboard is documented for pnpm; ignore other package managers' lockfiles
-bun.lock
+# bun is the TS package manager — commit bun.lock (negate the global *.lock rule),
+# ignore other managers' lockfiles
+!bun.lock
+pnpm-lock.yaml
 package-lock.json
+yarn.lock
 
 # memeora runtime data & models
 .memeora/

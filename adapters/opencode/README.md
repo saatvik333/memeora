@@ -36,7 +36,7 @@ The tools default to the current project scope.
 
 For the convenience tools (`memeora_recall` / `memeora_remember` /
 `memeora_context`) plus profile injection into the compaction prompt, load the
-plugin. Either publish it to npm and reference it:
+plugin. Either publish it (`bun publish`) and reference it:
 
 ```jsonc
 {

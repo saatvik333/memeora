@@ -1,6 +1,6 @@
 //! Guarantees the dashboard asset folder (`dashboard/dist`) exists at compile
 //! time so `rust_embed` always builds — including in CI, where the Svelte
-//! frontend isn't built (no Node toolchain). A real `pnpm --dir dashboard build`
+//! frontend isn't built (no JS toolchain). A real `bun --cwd dashboard run build`
 //! overwrites this placeholder with the actual app, which then gets embedded.
 
 use std::fs;
@@ -18,8 +18,8 @@ const PLACEHOLDER: &str = r#"<!doctype html>
 <code>/api/context</code>, <code>/api/list</code> and the live stream at
 <code>/api/events</code>.</p>
 <p>To build the graph UI, run:</p>
-<pre><code>pnpm --dir dashboard install
-pnpm --dir dashboard build</code></pre>
+<pre><code>bun --cwd dashboard install
+bun --cwd dashboard run build</code></pre>
 <p>then rebuild the daemon (<code>cargo build --release -p memeora-daemon</code>).</p>
 </body>
 </html>
@@ -35,6 +35,6 @@ fn main() {
         let _ = fs::create_dir_all(&dist);
         let _ = fs::write(&index, PLACEHOLDER);
     }
-    // Re-run if the built assets change, so a fresh `pnpm build` is picked up.
+    // Re-run if the built assets change, so a fresh `bun run build` is picked up.
     println!("cargo:rerun-if-changed={}", dist.display());
 }

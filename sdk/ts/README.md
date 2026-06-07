@@ -8,7 +8,7 @@ versioned IPC protocol as the Rust SDK (`memeora-client`); see
 ## Install
 
 ```sh
-npm install @memeora/client
+bun add @memeora/client
 ```
 
 Requires a running `memeora-daemon`.
