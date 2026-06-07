@@ -14,7 +14,8 @@ builds a knowledge graph, and recalls the right context at the right time. It's 
 > episodes); Tier-0 **extraction** — a model-free `Extractor` that classifies text into
 > fact/preference/episode candidates; and an **ingest** write path that embeds candidates,
 > reinforces near-duplicates instead of storing copies, and links related memories with
-> `extends` edges in a SQLite-backed knowledge graph. The daemon + MCP server are next.
+> `extends` edges in a SQLite-backed knowledge graph; plus the versioned **IPC contract**
+> (`crates/proto`) the daemon and clients share. Daemon + MCP server in progress.
 > See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## Highlights
