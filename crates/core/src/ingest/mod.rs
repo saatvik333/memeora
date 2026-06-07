@@ -16,7 +16,7 @@
 use crate::Result;
 use crate::container_tag::sha16;
 use crate::embed::EmbeddingProvider;
-use crate::extract::Extractor;
+use crate::extract::{Candidate, Extractor};
 use crate::store::{EdgeKind, VectorStore};
 
 /// Tuning for [`ingest`].
@@ -79,6 +79,20 @@ pub fn ingest(
     params: &IngestParams,
 ) -> Result<IngestOutcome> {
     let candidates = extractor.extract(text)?;
+    ingest_candidates(store, embedder, container_tag, candidates, params)
+}
+
+/// Embed and write already-extracted `candidates` into `store` under
+/// `container_tag`, applying the same dedup/reinforce + `extends`-linking logic as
+/// [`ingest`]. Used directly when memories come from somewhere other than the
+/// heuristic extractor (e.g. an explicit "add this").
+pub fn ingest_candidates(
+    store: &mut dyn VectorStore,
+    embedder: &dyn EmbeddingProvider,
+    container_tag: &str,
+    candidates: Vec<Candidate>,
+    params: &IngestParams,
+) -> Result<IngestOutcome> {
     let mut outcome = IngestOutcome::default();
 
     for candidate in candidates {
