@@ -56,11 +56,6 @@ impl Default for SearchParams {
     }
 }
 
-/// Whether a memory has passed its expiry time.
-fn is_expired(memory: &Memory, now: i64) -> bool {
-    matches!(memory.expires_at, Some(exp) if exp <= now)
-}
-
 /// Fuse one or more ranked lists (best-first) into a single ranking via RRF.
 ///
 /// Each surviving (non-expired) memory's score is `Σ 1/(rrf_k + rank)` over the
@@ -71,7 +66,7 @@ fn rrf_fuse(lists: &[Vec<ScoredMemory>], rrf_k: f32, k: usize, now: i64) -> Vec<
     for list in lists {
         let mut rank = 0usize;
         for scored in list {
-            if is_expired(&scored.memory, now) {
+            if scored.memory.is_expired(now) {
                 continue;
             }
             rank += 1;

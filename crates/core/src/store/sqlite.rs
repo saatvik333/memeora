@@ -201,6 +201,19 @@ impl VectorStore for SqliteStore {
         )?;
         Ok(n as usize)
     }
+
+    fn list_latest(&self, container_tag: &str, limit: usize) -> Result<Vec<Memory>> {
+        let sql = format!(
+            "SELECT {MEMORY_COLS} FROM memories m
+             WHERE m.container_tag = ?1 AND m.is_latest = 1
+             ORDER BY m.created_at DESC, m.rowid DESC
+             LIMIT ?2"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![container_tag, limit as i64], row_to_memory)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
 }
 
 #[cfg(test)]

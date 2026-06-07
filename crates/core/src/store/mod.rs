@@ -102,6 +102,12 @@ impl Memory {
             metadata: "{}".to_string(),
         }
     }
+
+    /// Whether this memory has passed its expiry time as of `now` (Unix seconds).
+    /// Memories with no `expires_at` never expire.
+    pub fn is_expired(&self, now: i64) -> bool {
+        matches!(self.expires_at, Some(exp) if exp <= now)
+    }
 }
 
 /// A memory with a relevance score. For `knn` the score is vector distance
@@ -130,4 +136,8 @@ pub trait VectorStore {
 
     /// Count memories within `container_tag`.
     fn count(&self, container_tag: &str) -> Result<usize>;
+
+    /// List the latest (current-version) memories in `container_tag`, newest
+    /// first, up to `limit`. Embedding is not hydrated (see [`Memory`]).
+    fn list_latest(&self, container_tag: &str, limit: usize) -> Result<Vec<Memory>>;
 }
