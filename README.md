@@ -6,18 +6,22 @@ memeora gives your AI coding tools **persistent memory** — it learns facts fro
 builds a knowledge graph, and recalls the right context at the right time. It's a free,
 **local-first**, open alternative to hosted memory APIs: **no required LLM, no API key, works offline.**
 
-> **Status:** Steps 1–3 implemented — SQLite + statically-linked `sqlite-vec` KNN + FTS5
-> behind the `VectorStore` trait (container-tag scoping); the `EmbeddingProvider` trait with
-> a content-hash cache and a local `fastembed` backend; hybrid retrieval — dense + BM25 fused
-> with **RRF**, expiry filtering, and an optional cross-encoder reranker (opt-in ONNX behind
-> the `fastembed` feature); cached per-tag **profiles** (static facts/prefs + dynamic
-> episodes); Tier-0 **extraction** — a model-free `Extractor` that classifies text into
-> fact/preference/episode candidates; and an **ingest** write path that embeds candidates,
-> reinforces near-duplicates instead of storing copies, and links related memories with
-> `extends` edges in a SQLite-backed knowledge graph; the versioned **IPC contract**
-> (`crates/proto`); and the daemon **`Engine`** that answers the full protocol
-> (ingest/add/recall/context/list/forget) over the engine. IPC transport + MCP next.
-> See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+> **Status:** Steps 1–6 implemented — the engine and its surfaces are end-to-end:
+> - **Engine (`crates/core`):** SQLite + statically-linked `sqlite-vec` KNN + FTS5 behind the
+>   `VectorStore` trait (container-tag scoping, soft-forget); `EmbeddingProvider` with a
+>   content-hash cache and a local `fastembed` backend; hybrid retrieval (dense + BM25 fused
+>   with **RRF**, expiry filtering, optional cross-encoder rerank); cached per-tag **profiles**;
+>   Tier-0 **extraction**; and an **ingest** path that dedups/reinforces and links memories with
+>   `extends` edges in a SQLite knowledge graph.
+> - **Daemon + IPC:** versioned contract (`crates/proto`) with length-delimited framing; a
+>   blocking **writer-actor** server over `interprocess`; the daemon binary loads the model + DB
+>   and serves it.
+> - **Surfaces:** `memeora-client` (typed Rust SDK), `memeora-mcp` (rmcp MCP server — recall/
+>   remember/context/list over stdio), the `memeora` **CLI**, and `memeora-hook` (Claude/Codex
+>   command-hook: session-start injection + Stop capture).
+>
+> Next: adapters packaging, dashboard, ecosystem, release. See
+> [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## Highlights
 - **Rust** engine + daemon + MCP server + hook binary + CLI → one self-contained distributable.

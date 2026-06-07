@@ -1729,8 +1729,11 @@ dependencies = [
 name = "memeora-hook"
 version = "0.0.0"
 dependencies = [
+ "clap",
  "memeora-client",
+ "memeora-core",
  "memeora-proto",
+ "serde_json",
 ]
 
 [[package]]
