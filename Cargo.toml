@@ -15,6 +15,7 @@ authors = ["the memeora authors"]
 memeora-core = { path = "crates/core" }
 memeora-proto = { path = "crates/proto" }
 memeora-client = { path = "crates/client" }
+memeora-daemon = { path = "crates/daemon" }
 memeora-mcp = { path = "crates/mcp" }
 
 # Shared third-party deps (pinned once for the whole workspace).

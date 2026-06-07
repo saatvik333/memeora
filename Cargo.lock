@@ -1471,6 +1471,9 @@ dependencies = [
 name = "memeora-client"
 version = "0.0.0"
 dependencies = [
+ "interprocess",
+ "memeora-core",
+ "memeora-daemon",
  "memeora-proto",
 ]
 

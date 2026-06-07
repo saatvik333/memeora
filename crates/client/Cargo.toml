@@ -10,3 +10,8 @@ authors.workspace = true
 
 [dependencies]
 memeora-proto.workspace = true
+interprocess.workspace = true
+
+[dev-dependencies]
+memeora-daemon.workspace = true
+memeora-core.workspace = true

@@ -7,6 +7,6 @@ fn main() {
     println!(
         "memeora {} (client protocol v{})",
         env!("CARGO_PKG_VERSION"),
-        memeora_client::PROTOCOL_VERSION,
+        memeora_proto::PROTOCOL_VERSION,
     );
 }
