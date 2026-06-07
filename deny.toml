@@ -28,6 +28,9 @@ allow = [
     # libfuzzer-sys, via rav1e -> ravif -> image -> fastembed. OSI-approved,
     # FSF Free/Libre, permissive (MIT/BSD-like).
     "NCSA",
+    # doctest-file / recvmsg (interprocess deps). Zero-clause BSD — public-domain
+    # equivalent, more permissive than MIT (no attribution required).
+    "0BSD",
 ]
 confidence-threshold = 0.9
 

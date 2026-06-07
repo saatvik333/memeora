@@ -15,4 +15,4 @@ path = "src/main.rs"
 [dependencies]
 memeora-core.workspace = true
 memeora-proto.workspace = true
-memeora-mcp.workspace = true
+interprocess.workspace = true

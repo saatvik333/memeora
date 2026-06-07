@@ -13,6 +13,11 @@ pub mod frame;
 /// Wire protocol version. Bumped on breaking changes to the IPC contract.
 pub const PROTOCOL_VERSION: u32 = 1;
 
+/// Default local-socket name the daemon listens on and clients connect to.
+/// A bare name (no path separator) is treated as a namespaced socket
+/// (Linux abstract namespace / Windows named pipe).
+pub const DEFAULT_SOCKET: &str = "memeora-daemon.sock";
+
 /// A scope/container identifier (e.g. a `memeora_user_*` / `repo_*` tag).
 pub type Scope = String;
 

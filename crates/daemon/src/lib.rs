@@ -6,5 +6,7 @@
 //! and the IPC transport (added in later steps; see `docs/ARCHITECTURE.md`).
 
 pub mod engine;
+pub mod server;
 
 pub use engine::Engine;
+pub use server::serve;
