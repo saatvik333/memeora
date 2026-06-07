@@ -12,8 +12,9 @@ builds a knowledge graph, and recalls the right context at the right time. It's 
 > with **RRF**, expiry filtering, and an optional cross-encoder reranker (opt-in ONNX behind
 > the `fastembed` feature); cached per-tag **profiles** (static facts/prefs + dynamic
 > episodes); Tier-0 **extraction** — a model-free `Extractor` that classifies text into
-> fact/preference/episode candidates; and an **ingest** write path that embeds candidates and
-> reinforces near-duplicates instead of storing copies. Graph edges + daemon next.
+> fact/preference/episode candidates; and an **ingest** write path that embeds candidates,
+> reinforces near-duplicates instead of storing copies, and links related memories with
+> `extends` edges in a SQLite-backed knowledge graph. The daemon + MCP server are next.
 > See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## Highlights

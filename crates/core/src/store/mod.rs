@@ -120,7 +120,52 @@ pub struct ScoredMemory {
     pub score: f32,
 }
 
-/// A scoped store of memories supporting vector KNN and lexical search.
+/// The kind of a directed edge between two memories in the knowledge graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeKind {
+    /// `from` supersedes `to` (contradiction-driven; Tier-1, deferred).
+    Updates,
+    /// `from` elaborates on a related `to` (moderate similarity).
+    Extends,
+    /// `from` was derived from `to` (LLM-driven; Tier-2, deferred).
+    Derives,
+}
+
+impl EdgeKind {
+    /// Stable string form persisted in the DB.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EdgeKind::Updates => "updates",
+            EdgeKind::Extends => "extends",
+            EdgeKind::Derives => "derives",
+        }
+    }
+
+    /// Parse from the persisted string, defaulting to [`EdgeKind::Extends`].
+    pub fn from_str_lossy(s: &str) -> EdgeKind {
+        match s {
+            "updates" => EdgeKind::Updates,
+            "derives" => EdgeKind::Derives,
+            _ => EdgeKind::Extends,
+        }
+    }
+}
+
+/// A directed edge `from_id --kind--> to_id` between two memories.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Relationship {
+    /// Source memory id.
+    pub from_id: String,
+    /// Target memory id.
+    pub to_id: String,
+    /// Edge type.
+    pub kind: EdgeKind,
+    /// Creation time (Unix seconds).
+    pub created_at: i64,
+}
+
+/// A scoped store of memories supporting vector KNN, lexical search, and a
+/// directed knowledge graph over memories.
 pub trait VectorStore {
     /// Insert or replace a memory (matched by `id`). Errors on embedding-dim mismatch.
     fn upsert(&mut self, memory: &Memory) -> Result<()>;
@@ -144,4 +189,11 @@ pub trait VectorStore {
     /// Reinforce a memory: add `delta` to its strength and set `last_accessed_at`
     /// to now. A no-op if `id` is unknown.
     fn reinforce(&mut self, id: &str, delta: f32) -> Result<()>;
+
+    /// Add a directed `from_id --kind--> to_id` edge. Idempotent (duplicate edges
+    /// of the same kind are ignored).
+    fn add_edge(&mut self, from_id: &str, to_id: &str, kind: EdgeKind) -> Result<()>;
+
+    /// All outgoing edges from `id`.
+    fn edges_from(&self, id: &str) -> Result<Vec<Relationship>>;
 }

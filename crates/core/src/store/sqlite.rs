@@ -6,7 +6,9 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::db;
 use crate::error::{Error, Result};
-use crate::store::{Memory, MemoryKind, ScoredMemory, VectorStore, now_unix};
+use crate::store::{
+    EdgeKind, Memory, MemoryKind, Relationship, ScoredMemory, VectorStore, now_unix,
+};
 
 /// SQLite store. Owns one connection (the daemon keeps a single writer; see ARCHITECTURE.md).
 pub struct SqliteStore {
@@ -222,6 +224,32 @@ impl VectorStore for SqliteStore {
         )?;
         Ok(())
     }
+
+    fn add_edge(&mut self, from_id: &str, to_id: &str, kind: EdgeKind) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO relationships (from_id, to_id, kind, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![from_id, to_id, kind.as_str(), now_unix()],
+        )?;
+        Ok(())
+    }
+
+    fn edges_from(&self, id: &str) -> Result<Vec<Relationship>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT from_id, to_id, kind, created_at FROM relationships WHERE from_id = ?1
+             ORDER BY created_at",
+        )?;
+        let rows = stmt.query_map(params![id], |row| {
+            Ok(Relationship {
+                from_id: row.get(0)?,
+                to_id: row.get(1)?,
+                kind: EdgeKind::from_str_lossy(&row.get::<_, String>(2)?),
+                created_at: row.get(3)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
 }
 
 #[cfg(test)]
@@ -322,6 +350,21 @@ mod tests {
         assert_eq!(s.get("m1").unwrap().unwrap().strength, 1.5);
         // Unknown id is a no-op, not an error.
         s.reinforce("nope", 1.0).unwrap();
+    }
+
+    #[test]
+    fn edges_roundtrip_and_are_idempotent() {
+        let mut s = SqliteStore::open_in_memory(2).unwrap();
+        s.upsert(&mem("a", "a", "t", vec![1.0, 0.0])).unwrap();
+        s.upsert(&mem("b", "b", "t", vec![0.0, 1.0])).unwrap();
+        s.add_edge("a", "b", EdgeKind::Extends).unwrap();
+        s.add_edge("a", "b", EdgeKind::Extends).unwrap(); // duplicate ignored
+
+        let edges = s.edges_from("a").unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].to_id, "b");
+        assert_eq!(edges[0].kind, EdgeKind::Extends);
+        assert!(s.edges_from("b").unwrap().is_empty());
     }
 
     #[test]

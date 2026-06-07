@@ -2,32 +2,41 @@
 //!
 //! [`ingest`] ties the pieces together: extract candidates, embed each, then
 //! either **reinforce** an existing near-duplicate (strengthen it instead of
-//! storing a redundant copy) or **insert** a new memory. This is the model-free
-//! MVP write path; the daemon runs it on its writer thread.
+//! storing a redundant copy) or **insert** a new memory and link it to its
+//! moderately-similar neighbors with `extends` edges. This is the model-free MVP
+//! write path; the daemon runs it on its writer thread.
 //!
 //! Memory ids are a content hash scoped to the container, so re-ingesting the
 //! exact same statement is naturally idempotent (it resolves to reinforcement),
 //! with no UUID dependency.
 //!
-//! Deferred (need the gated NER/NLI stack): `extends`/`updates` graph edges and
+//! Deferred (needs the gated NER/NLI stack): `updates` edges and
 //! contradiction-based supersession.
 
 use crate::Result;
 use crate::container_tag::sha16;
 use crate::embed::EmbeddingProvider;
 use crate::extract::Extractor;
-use crate::store::VectorStore;
+use crate::store::{EdgeKind, VectorStore};
 
 /// Tuning for [`ingest`].
+///
+/// Distance thresholds assume L2 distance over L2-normalized embeddings and are
+/// **provisional** — tune against real data.
 #[derive(Debug, Clone)]
 pub struct IngestParams {
     /// A candidate within this KNN distance of an existing memory of the **same
-    /// kind** reinforces it instead of being inserted. Provisional default —
-    /// assumes L2 distance over L2-normalized embeddings (≈ cosine ≥ 0.98); tune
-    /// against real data.
+    /// kind** reinforces it instead of being inserted (≈ cosine ≥ 0.98).
     pub dedup_max_distance: f32,
     /// Strength added to an existing memory when a near-duplicate reinforces it.
     pub reinforce_delta: f32,
+    /// A newly inserted memory gets an `extends` edge to each neighbor within this
+    /// distance (and beyond `dedup_max_distance`) — moderate relatedness.
+    pub extends_max_distance: f32,
+    /// Max `extends` edges to create per new memory.
+    pub max_links: usize,
+    /// KNN pool size considered for dedup + linking.
+    pub link_candidates: usize,
 }
 
 impl Default for IngestParams {
@@ -35,6 +44,9 @@ impl Default for IngestParams {
         IngestParams {
             dedup_max_distance: 0.2,
             reinforce_delta: 0.5,
+            extends_max_distance: 0.6,
+            max_links: 3,
+            link_candidates: 5,
         }
     }
 }
@@ -46,6 +58,8 @@ pub struct IngestOutcome {
     pub added: Vec<String>,
     /// Ids of existing memories that were reinforced by a near-duplicate.
     pub reinforced: Vec<String>,
+    /// Number of `extends` edges created.
+    pub edges_added: usize,
 }
 
 /// Deterministic, container-scoped id for a memory's content.
@@ -74,17 +88,29 @@ pub fn ingest(
             .pop()
             .unwrap_or_default();
 
-        // Find a near-duplicate of the same kind (scoped so the immutable borrow
-        // ends before the mutable reinforce below).
-        let duplicate_id = {
-            let neighbors = store.knn(container_tag, &embedding, 1)?;
-            neighbors
+        // One KNN lookup serves both dedup and linking. Scope the immutable borrow
+        // so it ends before the mutable writes below; carry only owned decisions out.
+        let (duplicate_id, link_targets) = {
+            let neighbors = store.knn(container_tag, &embedding, params.link_candidates.max(1))?;
+            let duplicate_id = neighbors
                 .first()
                 .filter(|top| {
                     top.score <= params.dedup_max_distance && top.memory.kind == candidate.kind
                 })
-                .map(|top| top.memory.id.clone())
+                .map(|top| top.memory.id.clone());
+            let link_targets: Vec<String> = if duplicate_id.is_some() {
+                Vec::new()
+            } else {
+                neighbors
+                    .iter()
+                    .filter(|n| n.score <= params.extends_max_distance)
+                    .take(params.max_links)
+                    .map(|n| n.memory.id.clone())
+                    .collect()
+            };
+            (duplicate_id, link_targets)
         };
+
         if let Some(id) = duplicate_id {
             store.reinforce(&id, params.reinforce_delta)?;
             outcome.reinforced.push(id);
@@ -94,6 +120,11 @@ pub fn ingest(
         let id = content_id(container_tag, &candidate.content);
         let memory = candidate.into_memory(id.clone(), container_tag, embedding);
         store.upsert(&memory)?;
+        // Link the new memory to its moderately-similar neighbors.
+        for target in &link_targets {
+            store.add_edge(&id, target, EdgeKind::Extends)?;
+            outcome.edges_added += 1;
+        }
         outcome.added.push(id);
     }
 
@@ -235,6 +266,83 @@ mod tests {
             "different kind should insert, not reinforce"
         );
         assert_eq!(store.count("t").unwrap(), 2);
+    }
+
+    #[test]
+    fn links_new_memory_to_related_neighbor() {
+        let extractor = HeuristicExtractor::default();
+        let embedder = MapEmbedder::new(&[
+            ("I prefer dark mode", vec![1.0, 0.0, 0.0]),
+            ("I prefer light themes sometimes", vec![0.0, 1.0, 0.0]),
+        ]);
+        let mut store = SqliteStore::open_in_memory(3).unwrap();
+        // dedup tiny (nothing merges) + extends huge (any neighbor links).
+        let params = IngestParams {
+            dedup_max_distance: 0.001,
+            extends_max_distance: 100.0,
+            ..IngestParams::default()
+        };
+
+        let a = ingest(
+            &mut store,
+            &embedder,
+            &extractor,
+            "t",
+            "I prefer dark mode",
+            &params,
+        )
+        .unwrap();
+        let b = ingest(
+            &mut store,
+            &embedder,
+            &extractor,
+            "t",
+            "I prefer light themes sometimes",
+            &params,
+        )
+        .unwrap();
+
+        assert_eq!(b.added.len(), 1);
+        assert_eq!(b.edges_added, 1);
+        let edges = store.edges_from(&b.added[0]).unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].to_id, a.added[0]);
+        assert_eq!(edges[0].kind, crate::store::EdgeKind::Extends);
+    }
+
+    #[test]
+    fn no_links_when_beyond_extends_distance() {
+        let extractor = HeuristicExtractor::default();
+        let embedder = MapEmbedder::new(&[
+            ("I prefer dark mode", vec![1.0, 0.0, 0.0]),
+            ("I prefer light themes sometimes", vec![0.0, 1.0, 0.0]),
+        ]);
+        let mut store = SqliteStore::open_in_memory(3).unwrap();
+        let params = IngestParams {
+            dedup_max_distance: 0.001,
+            extends_max_distance: 0.0,
+            ..IngestParams::default()
+        };
+
+        ingest(
+            &mut store,
+            &embedder,
+            &extractor,
+            "t",
+            "I prefer dark mode",
+            &params,
+        )
+        .unwrap();
+        let b = ingest(
+            &mut store,
+            &embedder,
+            &extractor,
+            "t",
+            "I prefer light themes sometimes",
+            &params,
+        )
+        .unwrap();
+        assert_eq!(b.edges_added, 0);
     }
 
     #[test]
