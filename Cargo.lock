@@ -1492,6 +1492,7 @@ dependencies = [
 name = "memeora-daemon"
 version = "0.0.0"
 dependencies = [
+ "dirs",
  "interprocess",
  "memeora-core",
  "memeora-proto",

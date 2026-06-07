@@ -13,6 +13,7 @@ name = "memeora-daemon"
 path = "src/main.rs"
 
 [dependencies]
-memeora-core.workspace = true
+memeora-core = { workspace = true, features = ["fastembed"] }
 memeora-proto.workspace = true
 interprocess.workspace = true
+dirs.workspace = true
