@@ -8,6 +8,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod frame;
+
 /// Wire protocol version. Bumped on breaking changes to the IPC contract.
 pub const PROTOCOL_VERSION: u32 = 1;
 
