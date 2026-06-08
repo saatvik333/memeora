@@ -1,6 +1,7 @@
 # memeora
 
 Self-hosted memory engine + universal connector for Claude Code, Codex, Antigravity & OpenCode.
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/6b61963c-47f4-40b4-accd-7c4397603839" />
 
 memeora gives your AI coding tools **persistent memory** — it learns facts from your sessions,
 builds a knowledge graph, and recalls the right context at the right time. It's a free,
