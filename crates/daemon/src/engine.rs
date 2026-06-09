@@ -133,6 +133,8 @@ pub struct Engine {
     /// Optional sink for [`ChangeEvent`]s, set by the daemon when the dashboard is
     /// enabled. `send` is best-effort: an error just means no live listeners.
     events: Option<broadcast::Sender<ChangeEvent>>,
+    #[cfg(test)]
+    panic_once: Option<&'static str>,
 }
 
 impl Engine {
@@ -150,6 +152,8 @@ impl Engine {
             ingest_params: IngestParams::default(),
             search_params: SearchParams::default(),
             events: None,
+            #[cfg(test)]
+            panic_once: None,
         }
     }
 
@@ -169,6 +173,12 @@ impl Engine {
                 op,
             });
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_panic_once(mut self, message: &'static str) -> Self {
+        self.panic_once = Some(message);
+        self
     }
 
     /// A [`Preparer`] sharing this engine's embedder + extractor, for use on the
@@ -194,6 +204,10 @@ impl Engine {
     /// Apply an already-prepared request to the DB, converting any engine error
     /// into [`Response::Error`].
     pub(crate) fn handle_prepared(&mut self, prepared: Prepared) -> Response {
+        #[cfg(test)]
+        if let Some(message) = self.panic_once.take() {
+            panic!("{message}");
+        }
         match self.dispatch(prepared) {
             Ok(response) => response,
             Err(err) => Response::Error {

@@ -14,6 +14,6 @@ memeora-proto.workspace = true
 memeora-client.workspace = true
 memeora-core.workspace = true
 rmcp = { version = "1.7.0", features = ["server", "macros", "transport-io", "schemars"] }
-tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "io-std"] }
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "io-std", "time"] }
 schemars = "1.2.1"
 serde = { workspace = true, features = ["derive"] }

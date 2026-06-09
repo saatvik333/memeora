@@ -111,8 +111,10 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         // sole writer by construction, not by call-ordering.
         match SqliteStore::open_readonly(&db_path, dim) {
             Ok(read_store) => {
+                let dim = read_store.dim();
                 let socket = socket.clone();
                 let events = events_tx.clone();
+                let db_path = db_path.clone();
                 std::thread::spawn(move || {
                     let rt = match tokio::runtime::Runtime::new() {
                         Ok(rt) => rt,
@@ -123,7 +125,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                     };
                     rt.block_on(async move {
                         eprintln!("memeora-daemon: dashboard on http://{addr}");
-                        if let Err(e) = dashboard::serve(addr, read_store, socket, events).await {
+                        if let Err(e) = dashboard::serve(addr, db_path, dim, socket, events).await {
                             eprintln!("memeora-daemon: dashboard stopped: {e}");
                         }
                     });

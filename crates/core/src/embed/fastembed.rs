@@ -38,6 +38,10 @@ pub struct FastEmbedder {
 impl FastEmbedder {
     /// Load the default model (BGE-small-en-v1.5, 384-d), caching weights under
     /// `cache_dir` (or fastembed's default location when `None`).
+    ///
+    /// First load downloads weights into the cache; later loads reuse cached weights.
+    /// If the cache is missing or corrupt, `TextEmbedding::try_new` returns an
+    /// [`Error::Embedding`] instead of silently falling back to a different model.
     pub fn bge_small(cache_dir: Option<PathBuf>) -> Result<Self> {
         Self::new(EmbeddingModel::BGESmallENV15, cache_dir)
     }
@@ -122,6 +126,25 @@ impl EmbeddingProvider for FastEmbedder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bge_small_registry_shape_is_available_without_downloading() {
+        let dim = model_dim(&EmbeddingModel::BGESmallENV15).unwrap();
+        assert_eq!(dim, 384);
+
+        let space = EmbeddingSpace::new(
+            "fastembed",
+            format!("{:?}", EmbeddingModel::BGESmallENV15),
+            dim,
+        );
+        assert_eq!(space.namespace(), "fastembed/BGESmallENV15/384");
+    }
+
+    #[test]
+    fn query_instruction_is_model_specific() {
+        assert!(query_instruction(&EmbeddingModel::BGESmallENV15).is_some());
+        assert!(query_instruction(&EmbeddingModel::AllMiniLML6V2).is_none());
+    }
 
     #[test]
     #[ignore = "downloads the BGE-small model from HuggingFace on first run"]

@@ -190,6 +190,10 @@ mod tests {
         )
     }
 
+    fn test_engine_with_panic_once() -> Engine {
+        test_engine().with_test_panic_once("test writer panic")
+    }
+
     fn connect(socket: &str) -> BufReader<Stream> {
         // The server binds before accepting; retry until it's up.
         for _ in 0..200 {
@@ -249,6 +253,103 @@ mod tests {
         {
             Response::Memories { memories } => assert_eq!(memories.len(), 1),
             other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn concurrent_clients_share_writer() {
+        let socket = "memeora-test-server-concurrent.sock";
+        thread::spawn(move || serve(test_engine(), socket).unwrap());
+
+        let mut handles = Vec::new();
+        for i in 0..8 {
+            let socket = socket.to_string();
+            handles.push(thread::spawn(move || {
+                let mut conn = connect(&socket);
+                let content = format!("concurrent memory {i}");
+
+                frame::write_message(
+                    conn.get_mut(),
+                    &Request::Add {
+                        scope: "s".into(),
+                        content: content.clone(),
+                        kind: "fact".into(),
+                    },
+                )
+                .unwrap();
+                match frame::read_message::<_, Response>(&mut conn)
+                    .unwrap()
+                    .unwrap()
+                {
+                    Response::Added { id } => assert!(!id.is_empty()),
+                    other => panic!("unexpected add response: {other:?}"),
+                }
+
+                frame::write_message(
+                    conn.get_mut(),
+                    &Request::Recall {
+                        scope: "s".into(),
+                        query: content,
+                        k: 1,
+                    },
+                )
+                .unwrap();
+                match frame::read_message::<_, Response>(&mut conn)
+                    .unwrap()
+                    .unwrap()
+                {
+                    Response::Memories { memories } => assert_eq!(memories.len(), 1),
+                    other => panic!("unexpected recall response: {other:?}"),
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn writer_panic_recovers_and_keeps_serving() {
+        let socket = "memeora-test-server-panic-recovery.sock";
+        thread::spawn(move || serve(test_engine_with_panic_once(), socket).unwrap());
+
+        let mut conn = connect(socket);
+
+        frame::write_message(
+            conn.get_mut(),
+            &Request::Add {
+                scope: "s".into(),
+                content: "panic first".into(),
+                kind: "fact".into(),
+            },
+        )
+        .unwrap();
+        match frame::read_message::<_, Response>(&mut conn)
+            .unwrap()
+            .unwrap()
+        {
+            Response::Error { message } => {
+                assert_eq!(message, "internal error: the request handler panicked")
+            }
+            other => panic!("unexpected first response: {other:?}"),
+        }
+
+        frame::write_message(
+            conn.get_mut(),
+            &Request::Add {
+                scope: "s".into(),
+                content: "still alive".into(),
+                kind: "fact".into(),
+            },
+        )
+        .unwrap();
+        match frame::read_message::<_, Response>(&mut conn)
+            .unwrap()
+            .unwrap()
+        {
+            Response::Added { id } => assert!(!id.is_empty()),
+            other => panic!("unexpected recovery response: {other:?}"),
         }
     }
 

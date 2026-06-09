@@ -34,13 +34,15 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 step "test --all-features"
 cargo test --workspace --all-features
 
+DENY_MISSING=0
 if command -v cargo-deny >/dev/null 2>&1; then
     # --all-features matches the cargo-deny-action default; without it the
     # fastembed-only deps (and their licenses) aren't in the graph.
     step "cargo-deny --all-features check"
     cargo deny --all-features check
 else
-    printf '\n\033[33mskip:\033[0m cargo-deny not installed (CI still runs it).\n'
+    DENY_MISSING=1
+    printf '\n\033[33mskip:\033[0m cargo-deny not installed.\n'
     printf '      install: cargo install cargo-deny --locked\n'
 fi
 
@@ -54,6 +56,11 @@ if command -v bun >/dev/null 2>&1; then
     (cd adapters/opencode && bun install --frozen-lockfile && bun run check)
 else
     printf '\n\033[33mskip:\033[0m bun not installed (CI still runs the TS job).\n'
+fi
+
+if [[ "$DENY_MISSING" == 1 ]]; then
+    printf '\n\033[1;31mLocal full gate incomplete: cargo-deny is required to match CI.\033[0m\n'
+    exit 2
 fi
 
 printf '\n\033[1;32mAll checks passed.\033[0m\n'

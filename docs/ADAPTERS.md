@@ -13,7 +13,9 @@ There are three ways to integrate, easiest first.
 Any MCP-capable harness gets memory by pointing it at the `memeora-mcp` server
 (stdio). Tools: `recall`, `remember`, `context`, `list`. This is the universal
 baseline — just a config entry. The scope defaults to the current project
-(`MEMEORA_PROJECT_ROOT` → cwd), or pass an explicit `scope`.
+(`MEMEORA_PROJECT_ROOT` → cwd), or pass an explicit `scope`. The MCP server talks
+to the daemon over `$MEMEORA_SOCKET` (or `memeora-daemon.sock`), so hosts should
+set `MEMEORA_SOCKET` when they run the daemon on a filesystem socket.
 
 ## 2. Command-hook host — a descriptor file (no Rust)
 

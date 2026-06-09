@@ -84,6 +84,21 @@ test("hello without capabilities defaults to empty (back-compat)", async () => {
   c.close();
 });
 
+test("hello with future fields still connects", async () => {
+  const p = await startStub(
+    withHello(() => {}, {
+      type: "hello",
+      protocol_version: 1,
+      server_version: "1.0.0",
+      capabilities: [],
+      future: true,
+    }),
+  );
+  const c = await Client.connect(p);
+  expect(c.getCapabilities()).toEqual([]);
+  c.close();
+});
+
 test("protocol version mismatch rejects", async () => {
   const p = await startStub(
     withHello(() => {}, { type: "hello", protocol_version: 2, server_version: "1.0.0" }),

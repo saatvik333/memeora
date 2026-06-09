@@ -10,7 +10,9 @@ policy the ecosystem can build on.
 - A local socket (Unix domain socket / Windows named pipe) via `interprocess`.
   The name resolves from a string: one containing a path separator is a
   filesystem socket path, otherwise a namespaced name (`DEFAULT_SOCKET =
-  "memeora-daemon.sock"`, overridable with `MEMEORA_SOCKET`).
+  "memeora-daemon.sock"`, overridable with `MEMEORA_SOCKET`). On macOS/BSD, use
+  a filesystem socket path because bare namespaced names cannot be matched by the
+  Rust/Node clients.
 - **Framing:** each message is a `u32` big-endian length prefix followed by that
   many bytes of UTF-8 JSON. Messages larger than `MAX_MESSAGE_BYTES` (16 MiB) are
   rejected. A clean EOF between frames is a normal close.

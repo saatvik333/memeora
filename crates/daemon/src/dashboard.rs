@@ -17,7 +17,8 @@
 use std::convert::Infallible;
 use std::fmt::Display;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use axum::Json;
 use axum::Router;
@@ -48,8 +49,10 @@ const DEFAULT_GRAPH_CAP: usize = 2000;
 /// Shared dashboard state. Cheap to clone (everything is `Arc`/`Sender`).
 #[derive(Clone)]
 struct AppState {
-    /// Read-only connection for scope/graph/list/context queries.
-    read: Arc<Mutex<SqliteStore>>,
+    /// Path to the WAL database; each read opens its own read-only connection.
+    db_path: Arc<PathBuf>,
+    /// Embedding dimensionality persisted by the writer store.
+    dim: usize,
     /// The daemon's IPC socket — for search (needs the embedder) and forget.
     socket: Arc<str>,
     /// Source of [`ChangeEvent`]s for the SSE live stream.
@@ -61,13 +64,15 @@ struct AppState {
 /// Build the dashboard router over the given state pieces. Split from [`serve`]
 /// so it can be exercised in tests without binding a socket.
 fn build_router(
-    read: Arc<Mutex<SqliteStore>>,
+    db_path: PathBuf,
+    dim: usize,
     socket: String,
     events: broadcast::Sender<ChangeEvent>,
     graph_cap: usize,
 ) -> Router {
     let state = AppState {
-        read,
+        db_path: Arc::new(db_path),
+        dim,
         socket: Arc::from(socket),
         events,
         graph_cap,
@@ -86,21 +91,17 @@ fn build_router(
         .with_state(state)
 }
 
-/// Serve the dashboard on `addr` until the process exits. `read_store` is a
-/// dedicated read connection; `socket` is the daemon's IPC socket; `events` is the
-/// engine's change broadcaster.
+/// Serve the dashboard on `addr` until the process exits. `db_path` is the WAL
+/// database path; every read opens a second read-only connection, while `socket`
+/// is the daemon's IPC socket and `events` is the engine's change broadcaster.
 pub async fn serve(
     addr: SocketAddr,
-    read_store: SqliteStore,
+    db_path: PathBuf,
+    dim: usize,
     socket: String,
     events: broadcast::Sender<ChangeEvent>,
 ) -> std::io::Result<()> {
-    let app = build_router(
-        Arc::new(Mutex::new(read_store)),
-        socket,
-        events,
-        DEFAULT_GRAPH_CAP,
-    );
+    let app = build_router(db_path, dim, socket, events, DEFAULT_GRAPH_CAP);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await
 }
@@ -240,21 +241,21 @@ async fn static_asset(uri: Uri) -> Response {
     }
 }
 
-/// Run a read-only store query on a blocking thread, recovering a poisoned lock
-/// (a poisoned read store is at worst stale, never unsafe).
+/// Run a read-only store query on a blocking thread, opening a fresh read-only
+/// connection per request so dashboard reads do not serialize behind one mutex.
 async fn read<T, F>(st: &AppState, f: F) -> Result<T, ApiError>
 where
     F: FnOnce(&SqliteStore) -> memeora_core::Result<T> + Send + 'static,
     T: Send + 'static,
 {
-    let store = st.read.clone();
+    let path = st.db_path.clone();
+    let dim = st.dim;
     tokio::task::spawn_blocking(move || {
-        let guard = store.lock().unwrap_or_else(|e| e.into_inner());
-        f(&guard)
+        let store = SqliteStore::open_readonly(path.as_path(), dim).map_err(ApiError::internal)?;
+        f(&store).map_err(ApiError::internal)
     })
     .await
     .map_err(ApiError::internal)?
-    .map_err(ApiError::internal)
 }
 
 // ---- DTOs -------------------------------------------------------------------
@@ -447,24 +448,43 @@ mod tests {
     use axum::http::Request;
     use http_body_util::BodyExt;
     use memeora_core::{EdgeKind, MemoryKind};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tower::ServiceExt; // for `oneshot`
+
+    static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
     fn mem(id: &str, content: &str, tag: &str) -> Memory {
         Memory::new(id, content, MemoryKind::Fact, tag, vec![1.0, 0.0])
     }
 
-    fn test_app() -> Router {
-        let mut store = SqliteStore::open_in_memory(2).unwrap();
+    fn test_store() -> (PathBuf, SqliteStore) {
+        let counter = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "memeora-dashboard-test-{}-{}.db",
+            std::process::id(),
+            counter
+        ));
+        let mut store = SqliteStore::open(&path, 2).unwrap();
         store.upsert(&mem("a", "alpha", "tag_a")).unwrap();
         store.upsert(&mem("b", "beta", "tag_a")).unwrap();
         store.add_edge("a", "b", EdgeKind::Extends).unwrap();
         store.upsert(&mem("c", "gamma", "tag_b")).unwrap();
+        (path, store)
+    }
+
+    fn test_app() -> (Router, PathBuf) {
+        let (path, store) = test_store();
+        let dim = store.dim();
         let (tx, _) = broadcast::channel(16);
-        build_router(
-            Arc::new(Mutex::new(store)),
-            "unused.sock".to_string(),
-            tx,
-            DEFAULT_GRAPH_CAP,
+        (
+            build_router(
+                path.clone(),
+                dim,
+                "unused.sock".to_string(),
+                tx,
+                DEFAULT_GRAPH_CAP,
+            ),
+            path,
         )
     }
 
@@ -475,7 +495,8 @@ mod tests {
 
     #[tokio::test]
     async fn scopes_endpoint_lists_tags_with_counts() {
-        let resp = test_app()
+        let (app, _db_path) = test_app();
+        let resp = app
             .oneshot(Request::get("/api/scopes").body(Body::empty()).unwrap())
             .await
             .unwrap();
@@ -487,7 +508,8 @@ mod tests {
 
     #[tokio::test]
     async fn graph_endpoint_returns_nodes_and_edges() {
-        let resp = test_app()
+        let (app, _db_path) = test_app();
+        let resp = app
             .oneshot(
                 Request::get("/api/graph?scope=tag_a")
                     .body(Body::empty())
@@ -507,7 +529,8 @@ mod tests {
     async fn unknown_route_falls_back_to_index_html() {
         // The build.rs placeholder guarantees index.html exists, so an unknown SPA
         // route serves HTML (200) rather than 404.
-        let resp = test_app()
+        let (app, _db_path) = test_app();
+        let resp = app
             .oneshot(Request::get("/some/spa/route").body(Body::empty()).unwrap())
             .await
             .unwrap();

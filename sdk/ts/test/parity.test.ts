@@ -21,6 +21,14 @@ test("PROTOCOL_VERSION matches the Rust proto", () => {
   expect(Number(m![1])).toBe(PROTOCOL_VERSION);
 });
 
+test("capability tokens match the Rust proto", () => {
+  const lib = rust("crates/proto/src/lib.rs");
+  const expected = ["ingest", "add", "recall", "context", "list", "forget"];
+  for (const cap of expected) {
+    expect(lib).toContain(`pub const ${cap.toUpperCase()}: &str = "${cap}";`);
+  }
+});
+
 test("MAX_MESSAGE_BYTES matches the Rust framing", () => {
   const frame = rust("crates/proto/src/frame.rs");
   const m = frame.match(/MAX_MESSAGE_BYTES:\s*u32\s*=\s*([0-9*\s]+);/);

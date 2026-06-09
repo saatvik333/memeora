@@ -14,6 +14,7 @@ use rmcp::transport::stdio;
 use rmcp::{ErrorData, ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::Deserialize;
+use std::time::Duration;
 
 /// Run the MCP server over stdio until the client disconnects.
 ///
@@ -40,6 +41,8 @@ pub struct MemoryServer {
     /// launch and isn't a reliable per-call project signal.
     default_scope: String,
 }
+
+const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Arguments for `recall`.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -187,8 +190,22 @@ where
     F: FnOnce() -> std::io::Result<T> + Send + 'static,
     T: Send + 'static,
 {
-    tokio::task::spawn_blocking(f)
+    blocking_with_timeout(f, CALL_TIMEOUT).await
+}
+
+async fn blocking_with_timeout<T, F>(f: F, timeout: Duration) -> Result<T, ErrorData>
+where
+    F: FnOnce() -> std::io::Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::time::timeout(timeout, tokio::task::spawn_blocking(f))
         .await
+        .map_err(|_| {
+            ErrorData::internal_error(
+                format!("memeora daemon call timed out after {timeout:?}"),
+                None,
+            )
+        })?
         .map_err(|e| ErrorData::internal_error(e.to_string(), None))?
         .map_err(map_io_err)
 }
@@ -199,7 +216,9 @@ fn map_io_err(e: std::io::Error) -> ErrorData {
     use std::io::ErrorKind::*;
     match e.kind() {
         ConnectionRefused | NotFound | ConnectionReset | BrokenPipe => ErrorData::internal_error(
-            format!("memeora daemon unreachable ({e}); is `memeora-daemon` running?"),
+            format!(
+                "memeora daemon unreachable ({e}); is `memeora-daemon` running and does `MEMEORA_SOCKET` point at its socket?"
+            ),
             None,
         ),
         _ => ErrorData::internal_error(e.to_string(), None),
@@ -246,5 +265,19 @@ mod tests {
         let s = default_scope();
         assert!(!s.is_empty());
         assert!(s.starts_with("memeora_project_"));
+    }
+
+    #[tokio::test]
+    async fn blocking_call_times_out() {
+        let err = blocking_with_timeout(
+            || {
+                std::thread::sleep(Duration::from_millis(50));
+                Ok::<(), std::io::Error>(())
+            },
+            Duration::from_millis(1),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:?}").contains("timed out"));
     }
 }

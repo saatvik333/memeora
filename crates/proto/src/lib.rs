@@ -263,8 +263,27 @@ mod tests {
     }
 
     #[test]
-    fn capability_set_is_nonempty_and_roundtrips() {
+    fn hello_with_unknown_fields_is_back_compatible() {
+        let json = r#"{"type":"hello","protocol_version":1,"server_version":"0.0.0","capabilities":[],"future":true}"#;
+        let resp: Response = serde_json::from_str(json).unwrap();
+        assert!(matches!(resp, Response::Hello { .. }));
+    }
+
+    #[test]
+    fn build_name_accepts_bare_and_filesystem_sockets() {
+        assert!(build_name("memeora-daemon.sock").is_ok());
+        assert!(build_name("/tmp/memeora-daemon.sock").is_ok());
+        assert!(build_name(r"\\.\pipe\memeora-daemon").is_ok());
+    }
+
+    #[test]
+    fn capability_set_is_unique_nonempty_and_stable() {
         assert!(!capability::ALL.is_empty());
+        let mut seen = std::collections::BTreeSet::new();
+        for cap in capability::ALL {
+            assert!(!cap.is_empty());
+            assert!(seen.insert(*cap), "duplicate capability: {cap}");
+        }
         let resp = Response::Hello {
             protocol_version: PROTOCOL_VERSION,
             server_version: "0.0.0".into(),
