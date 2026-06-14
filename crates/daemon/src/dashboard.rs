@@ -258,7 +258,7 @@ where
         let guard = store
             .lock()
             .map_err(|_| ApiError::internal("store lock poisoned"))?;
-        f(&*guard).map_err(ApiError::internal)
+        f(&guard).map_err(ApiError::internal)
     })
     .await
     .map_err(ApiError::internal)?
