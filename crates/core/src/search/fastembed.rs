@@ -43,10 +43,9 @@ impl FastEmbedReranker {
 
 impl Reranker for FastEmbedReranker {
     fn rerank(&self, query: &str, docs: &[&str], top_k: usize) -> Result<Vec<RerankHit>> {
-        let mut model = self
-            .model
-            .lock()
-            .map_err(|_| Error::Embedding("reranker model lock poisoned".into()))?;
+        // Recover a poisoned lock (a prior rerank panic) instead of failing forever —
+        // matches FastEmbedder::embed_documents; worst case is one bad batch.
+        let mut model = self.model.lock().unwrap_or_else(|e| e.into_inner());
         // `false` = don't return document text (we map back by index); results are
         // already sorted by descending relevance.
         let results = model

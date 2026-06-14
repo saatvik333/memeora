@@ -66,13 +66,28 @@ pub struct RememberArgs {
     pub kind: Option<String>,
 }
 
-/// Arguments for `context` and `list`.
+/// Arguments for `list`.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ScopeArgs {
     /// Scope/container tag (defaults to the current project).
     pub scope: Option<String>,
-    /// Max results, for `list` (default 20).
+    /// Max results (default 20).
     pub limit: Option<usize>,
+}
+
+/// Arguments for `context` — scope only (no `limit`, which `context` ignores, so it
+/// must not appear in the tool's JSON schema and mislead callers).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ContextArgs {
+    /// Scope/container tag (defaults to the current project).
+    pub scope: Option<String>,
+}
+
+/// Arguments for `forget`.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ForgetArgs {
+    /// The id of the memory to forget (soft-delete — history is preserved).
+    pub id: String,
 }
 
 /// Resolve a caller-supplied scope to a concrete container tag, falling back to
@@ -151,7 +166,7 @@ impl MemoryServer {
     )]
     async fn context(
         &self,
-        Parameters(args): Parameters<ScopeArgs>,
+        Parameters(args): Parameters<ContextArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let socket = self.socket.clone();
         let scope = resolve_scope(args.scope, &self.default_scope);
@@ -178,6 +193,20 @@ impl MemoryServer {
         Ok(CallToolResult::success(vec![Content::text(render(
             &memories,
         ))]))
+    }
+
+    #[tool(
+        description = "Forget (soft-delete) a memory by id. History is preserved; it just stops surfacing in recall/list/context."
+    )]
+    async fn forget(
+        &self,
+        Parameters(args): Parameters<ForgetArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let socket = self.socket.clone();
+        let id = args.id;
+        let reply = format!("forgot memory {id}");
+        blocking(move || Client::connect(&socket)?.forget(&id)).await?;
+        Ok(CallToolResult::success(vec![Content::text(reply)]))
     }
 }
 
