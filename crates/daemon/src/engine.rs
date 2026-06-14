@@ -14,7 +14,7 @@ use std::sync::Arc;
 use memeora_core::{
     Candidate, EmbeddingProvider, Extractor, IngestParams, Memory, MemoryKind, PreparedCandidate,
     ProfileCache, ScoredMemory, SearchParams, SqliteStore, VectorStore, embed_candidates,
-    ingest_prepared, search,
+    ingest_prepared, sanitize, search,
 };
 use memeora_proto::{MemoryDto, PROTOCOL_VERSION, Request, Response};
 use tokio::sync::broadcast;
@@ -81,6 +81,10 @@ impl Preparer {
         Ok(match request {
             Request::Hello { .. } => Prepared::Hello,
             Request::Ingest { scope, text } => {
+                // Enforce the privacy invariant at the engine boundary: strip
+                // <private>…</private> and redact secrets before extraction/embedding
+                // so every write surface (MCP/IPC/hook) inherits it.
+                let text = sanitize(&text);
                 let candidates = self.extractor.extract(&text)?;
                 let candidates = embed_candidates(self.embedder.as_ref(), candidates)?;
                 Prepared::Ingest { scope, candidates }
@@ -90,6 +94,9 @@ impl Preparer {
                 content,
                 kind,
             } => {
+                // Same engine-boundary sanitization as Ingest — an explicit `remember`
+                // / `add` must not bypass the privacy invariant.
+                let content = sanitize(&content);
                 let candidate = Candidate {
                     content,
                     kind: MemoryKind::from_str_lossy(&kind),
@@ -485,6 +492,42 @@ mod tests {
             limit: 10,
         }) {
             Response::Memories { memories } => assert!(memories.is_empty()),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn add_sanitizes_private_and_secrets() {
+        // The engine boundary must strip <private> spans and redact secrets on the
+        // explicit-write path too (this is what the MCP `remember` tool hits).
+        let mut e = engine(&[]);
+        let scope = "s";
+        let id = match e.handle(Request::Add {
+            scope: scope.into(),
+            content: "token sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ012345 <private>my ssh key</private> ok"
+                .into(),
+            kind: "fact".into(),
+        }) {
+            Response::Added { id } => id,
+            other => panic!("unexpected: {other:?}"),
+        };
+
+        match e.handle(Request::List {
+            scope: scope.into(),
+            limit: 10,
+        }) {
+            Response::Memories { memories } => {
+                let stored = &memories.iter().find(|m| m.id == id).unwrap().content;
+                assert!(!stored.contains("sk-ABCDEF"), "secret leaked: {stored:?}");
+                assert!(
+                    stored.contains("[REDACTED]"),
+                    "secret not masked: {stored:?}"
+                );
+                assert!(
+                    !stored.contains("my ssh key"),
+                    "private span leaked: {stored:?}"
+                );
+            }
             other => panic!("unexpected: {other:?}"),
         }
     }

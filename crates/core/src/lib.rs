@@ -14,6 +14,7 @@ mod error;
 pub mod extract;
 pub mod ingest;
 pub mod models;
+pub mod privacy;
 pub mod profile;
 pub mod search;
 pub mod store;
@@ -25,6 +26,7 @@ pub use ingest::{
     IngestOutcome, IngestParams, PreparedCandidate, embed_candidates, ingest, ingest_candidates,
     ingest_prepared,
 };
+pub use privacy::{redact, sanitize, strip_private};
 pub use profile::{Profile, ProfileCache, ProfileParams, build_profile};
 pub use search::{RerankHit, Reranker, SearchMode, SearchParams, rerank_memories, search};
 pub use store::sqlite::SqliteStore;
