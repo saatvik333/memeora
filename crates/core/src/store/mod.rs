@@ -76,6 +76,20 @@ pub struct Memory {
     pub expires_at: Option<i64>,
     /// Opaque JSON metadata.
     pub metadata: String,
+    /// Version chain: the memory this one directly supersedes (`None` for an original).
+    pub parent_id: Option<String>,
+    /// Version chain: the lineage root (`None` for an original); indexed for traversal.
+    pub root_id: Option<String>,
+    /// Bi-temporal valid-time: when the event occurred (vs `created_at` = when learned).
+    pub occurred_start: Option<i64>,
+    /// Bi-temporal valid-time: end of the occurrence interval, if any.
+    pub occurred_end: Option<i64>,
+    /// Distinct sources corroborating this memory (observation/consolidation layer).
+    pub proof_count: u32,
+    /// Durability for decay (Ebbinghaus/Cepeda); grows on spaced reinforcement.
+    pub stability: f32,
+    /// Times activated/reinforced (Hebbian potentiation).
+    pub access_count: u32,
 }
 
 impl Memory {
@@ -100,6 +114,13 @@ impl Memory {
             last_accessed_at: now,
             expires_at: None,
             metadata: "{}".to_string(),
+            parent_id: None,
+            root_id: None,
+            occurred_start: None,
+            occurred_end: None,
+            proof_count: 1,
+            stability: 1.0,
+            access_count: 0,
         }
     }
 

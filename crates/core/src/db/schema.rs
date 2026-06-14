@@ -37,6 +37,21 @@ fn migrations() -> Migrations<'static> {
         CREATE INDEX idx_relationships_from ON relationships(from_id);
         CREATE INDEX idx_relationships_to ON relationships(to_id);",
         ),
+        // Vision-readiness columns (additive, for step 11). Widening the schema now —
+        // while the store is pre-1.0 — keeps these a clean ALTER instead of a data
+        // migration over real memories later: version chain (parent_id/root_id),
+        // bi-temporal valid-time (occurred_start/end), observation corroboration
+        // (proof_count), and forgetting-engine bookkeeping (stability/access_count).
+        M::up(
+            "ALTER TABLE memories ADD COLUMN parent_id TEXT;
+             ALTER TABLE memories ADD COLUMN root_id TEXT;
+             ALTER TABLE memories ADD COLUMN occurred_start INTEGER;
+             ALTER TABLE memories ADD COLUMN occurred_end INTEGER;
+             ALTER TABLE memories ADD COLUMN proof_count INTEGER NOT NULL DEFAULT 1;
+             ALTER TABLE memories ADD COLUMN stability REAL NOT NULL DEFAULT 1.0;
+             ALTER TABLE memories ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0;
+             CREATE INDEX idx_memories_root ON memories(root_id);",
+        ),
     ])
 }
 

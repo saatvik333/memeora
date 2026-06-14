@@ -217,11 +217,19 @@ fn row_to_memory(row: &Row) -> rusqlite::Result<Memory> {
         last_accessed_at: row.get("last_accessed_at")?,
         expires_at: row.get("expires_at")?,
         metadata: row.get("metadata")?,
+        parent_id: row.get("parent_id")?,
+        root_id: row.get("root_id")?,
+        occurred_start: row.get("occurred_start")?,
+        occurred_end: row.get("occurred_end")?,
+        proof_count: row.get::<_, i64>("proof_count")? as u32,
+        stability: row.get::<_, f64>("stability")? as f32,
+        access_count: row.get::<_, i64>("access_count")? as u32,
     })
 }
 
 const MEMORY_COLS: &str = "m.id, m.content, m.kind, m.container_tag, m.is_latest, m.strength, \
-     m.created_at, m.last_accessed_at, m.expires_at, m.metadata";
+     m.created_at, m.last_accessed_at, m.expires_at, m.metadata, m.parent_id, m.root_id, \
+     m.occurred_start, m.occurred_end, m.proof_count, m.stability, m.access_count";
 
 impl VectorStore for SqliteStore {
     fn upsert(&mut self, memory: &Memory) -> Result<()> {
@@ -248,7 +256,9 @@ impl VectorStore for SqliteStore {
                 "UPDATE memories SET
                     content = ?2, kind = ?3, container_tag = ?4, is_latest = ?5,
                     strength = ?6, created_at = ?7, last_accessed_at = ?8,
-                    expires_at = ?9, metadata = ?10
+                    expires_at = ?9, metadata = ?10, parent_id = ?11, root_id = ?12,
+                    occurred_start = ?13, occurred_end = ?14, proof_count = ?15,
+                    stability = ?16, access_count = ?17
                  WHERE id = ?1",
                 params![
                     memory.id,
@@ -261,6 +271,13 @@ impl VectorStore for SqliteStore {
                     memory.last_accessed_at,
                     memory.expires_at,
                     memory.metadata,
+                    memory.parent_id,
+                    memory.root_id,
+                    memory.occurred_start,
+                    memory.occurred_end,
+                    memory.proof_count as i64,
+                    memory.stability as f64,
+                    memory.access_count as i64,
                 ],
             )?;
             // Refresh the vec row in place (same rowid; vec0 has no inbound FKs).
@@ -273,8 +290,10 @@ impl VectorStore for SqliteStore {
             tx.execute(
                 "INSERT INTO memories
                     (id, content, kind, container_tag, is_latest, strength,
-                     created_at, last_accessed_at, expires_at, metadata)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                     created_at, last_accessed_at, expires_at, metadata,
+                     parent_id, root_id, occurred_start, occurred_end, proof_count,
+                     stability, access_count)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
                 params![
                     memory.id,
                     memory.content,
@@ -286,6 +305,13 @@ impl VectorStore for SqliteStore {
                     memory.last_accessed_at,
                     memory.expires_at,
                     memory.metadata,
+                    memory.parent_id,
+                    memory.root_id,
+                    memory.occurred_start,
+                    memory.occurred_end,
+                    memory.proof_count as i64,
+                    memory.stability as f64,
+                    memory.access_count as i64,
                 ],
             )?;
             tx.last_insert_rowid()
@@ -396,7 +422,8 @@ impl VectorStore for SqliteStore {
 
     fn reinforce(&mut self, id: &str, delta: f32) -> Result<()> {
         self.conn.execute(
-            "UPDATE memories SET strength = strength + ?1, last_accessed_at = ?2 WHERE id = ?3",
+            "UPDATE memories SET strength = strength + ?1, last_accessed_at = ?2, \
+             access_count = access_count + 1 WHERE id = ?3",
             params![delta as f64, now_unix(), id],
         )?;
         Ok(())
@@ -627,6 +654,24 @@ mod tests {
         assert_eq!(edges.len(), 1, "edge must survive upsert of its endpoints");
         assert_eq!(edges[0].to_id, "b");
         assert_eq!(s.get("a").unwrap().unwrap().content, "a-updated");
+    }
+
+    #[test]
+    fn vision_columns_default_and_reinforce_bumps_access_count() {
+        // The step-11 readiness columns round-trip with their defaults, and reinforce
+        // accumulates real Hebbian access_count from day one.
+        let mut s = SqliteStore::open_in_memory(2).unwrap();
+        s.upsert(&mem("m1", "x", "t", vec![1.0, 0.0])).unwrap();
+        let m = s.get("m1").unwrap().unwrap();
+        assert_eq!((m.proof_count, m.access_count), (1, 0));
+        assert_eq!(m.stability, 1.0);
+        assert!(m.parent_id.is_none() && m.root_id.is_none());
+        assert!(m.occurred_start.is_none() && m.occurred_end.is_none());
+
+        s.reinforce("m1", 0.5).unwrap();
+        let m = s.get("m1").unwrap().unwrap();
+        assert_eq!(m.access_count, 1, "reinforce bumps Hebbian access_count");
+        assert!(m.strength > 1.0);
     }
 
     #[test]
