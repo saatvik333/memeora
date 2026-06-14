@@ -369,6 +369,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Ok(Some(report)) => {
                     let (ok, mismatch, missing) = report.counts();
                     println!("model integrity: {ok} ok, {mismatch} mismatched, {missing} missing");
+                    if !report.ok() {
+                        return Err("model integrity check failed".into());
+                    }
                 }
                 Ok(None) => println!("model integrity: no manifest (unverified)"),
                 Err(e) => println!("model integrity: check error: {e}"),
