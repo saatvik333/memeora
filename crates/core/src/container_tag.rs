@@ -49,7 +49,15 @@ pub fn project_tag(path: &str) -> String {
 /// Team-shareable scope, derived from the repository name (sanitized, not hashed),
 /// so teammates working on the same repo converge on the same tag.
 pub fn repo_tag(repo_name: &str) -> String {
-    format!("repo_{}", sanitize(repo_name))
+    let name = sanitize(repo_name);
+    if name.is_empty() {
+        // An empty or punctuation-only name has no readable form; hash it so distinct
+        // unusual names stay distinct instead of all collapsing to the bare "repo_"
+        // bucket and silently merging unrelated repos' memory.
+        format!("repo_{}", sha16(repo_name))
+    } else {
+        format!("repo_{name}")
+    }
 }
 
 /// Lowercase, collapse non-alphanumeric runs to single `_`, trim leading/trailing `_`.
@@ -104,5 +112,15 @@ mod tests {
         assert_eq!(repo_tag("My Repo!"), "repo_my_repo");
         assert_eq!(repo_tag("memeora"), "repo_memeora");
         assert_eq!(repo_tag("a--b__c"), "repo_a_b_c");
+    }
+
+    #[test]
+    fn repo_tag_punctuation_only_names_do_not_collide() {
+        // Names with no alphanumerics used to all sanitize to "" → the same "repo_"
+        // bucket. They are now hashed, so they stay distinct.
+        assert_ne!(repo_tag("!!!"), repo_tag("???"));
+        assert!(repo_tag("!!!").starts_with("repo_"));
+        assert_ne!(repo_tag("!!!"), "repo_");
+        assert_eq!(repo_tag("@@@"), repo_tag("@@@"), "still deterministic");
     }
 }
