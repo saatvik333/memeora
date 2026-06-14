@@ -43,7 +43,7 @@ The performance-critical stack has **first-class Rust libraries** (all Context7-
 - SQLite via **`rusqlite`** (bundled). **Register `sqlite-vec` *statically*** via the crate's `sqlite3_auto_extension`/init entrypoint (NOT runtime `load_extension`, which needs a dynamic `.so/.dylib/.dll` and breaks the single-distributable goal; reserve `load_extension` for `doctor`/dev only). Schema migrations via **`rusqlite_migration`** (`user_version`). `vec0` supports `float[N]`/`int8`/`bit[N]`, **KNN + metadata filters in one WHERE**, and `vec_quantize_binary()` — with limits to design around: **max 16 metadata columns** and restricted operators; vec0 is **brute-force, pre-v1**.
 - **Hybrid search:** dense (sqlite-vec) + lexical **BM25 (FTS5)** fused with **Reciprocal Rank Fusion (RRF)** → optional **cross-encoder rerank** (`fastembed-rs` `TextRerank`). Modes `hybrid` (default)/`memories`/`documents`. Benchmarks: SQLite+FTS5+sqlite-vec is fastest (~0.1–1ms) and ≥ others once reranked; 100% recall (brute force) well within personal-store size.
 - **`VectorStore` trait** → SQLite is the **default for personal-memory scale** (not framed as "fastest benchmarked" — the cited bench is small-N); a switch to **LanceDB** (Rust-native) for large/codebase-scale is **benchmark-driven**, and on *filtered* workloads LanceDB's own docs suggest `IVF_PQ`/`IVF_RQ` over `IVF_HNSW_SQ`.
-- DB at `~/.memeora/memory.db`. Tables: `memories`(content, embedding, fts, type, container_tag, is_latest, strength, created/last_accessed, expires_at, metadata), `relationships`(from_id,to_id,kind∈`updates|extends|derives`), `documents`, `profiles`.
+- DB at `~/.memeora/memory.db`. Tables: `memories` (content, kind, container_tag, is_latest, strength, created/last_accessed, expires_at, metadata, plus the step-11 columns parent_id/root_id, occurred_start/end, proof_count, stability, access_count), `vec_memories` (the `vec0` embedding index), `fts_memories` (FTS5 lexical index), `relationships`(from_id, to_id, kind — only `extends` is created today; `updates`/`derives` are reserved enum values), and a `meta` table recording the embedding dim. (`documents`/`profiles` are planned tables, not yet created — profiles are computed in memory and cached, not stored.)
 
 ### 3. Extraction — a **user-chosen tier ladder** (heuristic floor by default; Queued→Extract→Chunk→Embed→Index→Done)
 The only tier enabled out of the box is the heuristic floor; **every tier above it is the user's explicit choice** (`extractor = heuristic | local-llm | external`; detection ≠ activation; `localhost` = local, external = consented). Policy + rationale in **`docs/VISION.md`**.
@@ -76,11 +76,13 @@ The only tier enabled out of the box is the heuristic floor; **every tier above 
 ```
 memeora/
 ├── crates/
-│   ├── core/    engine: VectorStore + EmbeddingProvider + Extractor traits, graph, search(RRF), profiles
+│   ├── core/    engine: VectorStore + EmbeddingProvider + Extractor traits, graph, search(RRF), profiles, privacy
+│   ├── proto/   versioned IPC contract (Request/Response, length-delimited framing, capability handshake)
+│   ├── client/  memeora-client: typed Rust SDK over the IPC protocol
 │   ├── daemon/  blocking IPC server + optional axum dashboard; writer-actor owns sole DB connection; per-connection preparation
 │   ├── mcp/     rmcp stdio server → daemon client; tools below
 │   ├── hook/    `memeora-hook` binary for Claude/Codex/Antigravity command-hooks → daemon client
-│   └── cli/     `memeora` (clap): install/serve/doctor/models/scope → daemon client
+│   └── cli/     `memeora` (clap): doctor/add/ingest/recall/context/list/forget/scope/dashboard/adapter/models → daemon client
 ├── adapters/
 │   ├── claude-code/  .claude-plugin/{plugin.json,hooks.json,commands/*.md,skills/*/SKILL.md,.mcp.json}
 │   ├── codex/        .codex-plugin/plugin.json + hooks/hooks.json + config.toml snippet
@@ -124,9 +126,9 @@ Claude `Stop` / `SessionStart` / `PreCompact` · Codex `Stop` / `SessionStart` /
 
 **Served by the daemon, zero extra processes.** The daemon already holds the DB; add an **`axum`** (tokio-native, Context7-verified) HTTP server exposing a JSON API + **SSE** stream, with the built web assets **embedded into the binary via `rust-embed`**. `memeora dashboard` opens `localhost`. No separate deploy, still one binary, works offline.
 
-- **Frontend stack (chosen): Svelte 5 (runes) + Vite + TypeScript + Tailwind**, static SPA build (no SSR needed — served locally), embedded via `rust-embed`. Smaller bundle + no virtual-DOM overhead than React.
-- **Styling: deliberately minimal — no design system.** Native HTML controls + a small amount of plain CSS (or a thin Tailwind layer). `bits-ui` only where a primitive genuinely needs accessibility (dialog, popover) — otherwise plain elements. Function over form; the **graph is the centerpiece**, everything else is barebones. `lucide-svelte` icons optional. No bespoke tokens, no elaborate theming, no motion work.
-- **Graph rendering:** **Sigma.js + graphology** (WebGL, thousands of nodes; `graphology-layout-forceatlas2`), used **directly** in a Svelte component (`onMount`/action — Sigma is framework-agnostic, so no React wrapper needed). Nodes = memories (color by type: fact / preference / episode; size by strength·recency; dimmed when `is_latest=false`); edges = `updates`/`extends`/`derives`. Sigma (WebGL) is chosen over SVG diagramming (Svelte/React Flow) because the memory graph grows past what SVG handles.
+- **Frontend stack: Svelte 5 (runes) + Vite + TypeScript**, static SPA build (no SSR — served locally), embedded via `rust-embed`. Smaller bundle + no virtual-DOM overhead than React.
+- **Styling: a small design-token system with a system-aware light/dark theme** (a `:root` / `[data-theme="dark"]` palette + a runtime toggle, persisted). Built on **`bits-ui`** stock primitives (`AlertDialog`, `ScrollArea`, `Select`, `Separator`, `Tooltip`) over plain CSS, with `lucide-svelte` icons. The **graph is the centerpiece**; the surrounding chrome stays restrained but is a real, themed UI rather than bare native controls. *(History note: an earlier plan called for deliberately minimal, no-design-system styling; the shipped dashboard intentionally went richer.)*
+- **Graph rendering:** **Sigma.js + graphology** (WebGL) with a **ForceAtlas2 layout in a Web Worker** (`graphology-layout-forceatlas2/worker`), **Louvain community detection** (`graphology-communities-louvain`) for cluster colouring, and `@sigma/node-border`. Used **directly** in a Svelte component (Sigma is framework-agnostic, so no React wrapper). Nodes = memories (colour by community / type; size by strength·recency; dimmed when `is_latest=false`); edges = `extends` (with `updates`/`derives` reserved). WebGL is chosen over SVG diagramming because the memory graph grows past what SVG handles.
 - **Core views:**
   - **Graph canvas** — pan/zoom/cluster; click a node → inspector panel (content, type, metadata, relative time, similarity, relationships, version history via `updates`).
   - **Search** — hybrid search box highlights/filters matching nodes live.
