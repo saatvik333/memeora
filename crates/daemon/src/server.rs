@@ -75,8 +75,9 @@ fn spawn_writer(mut engine: Engine) -> SyncSender<Job> {
 /// extraction run on the connection threads via a shared [`Preparer`].
 pub fn serve(engine: Engine, socket: &str) -> io::Result<()> {
     // Sole-writer guard: if a daemon already answers on this socket, refuse to
-    // start rather than `try_overwrite` it and end up with two writers on one DB.
-    if Stream::connect(build_name(socket)?).is_ok() {
+    // start rather than overwrite it and end up with two writers on one DB.
+    let live = Stream::connect(build_name(socket)?).is_ok();
+    if live {
         return Err(io::Error::new(
             io::ErrorKind::AddrInUse,
             format!("a memeora-daemon is already listening on {socket}"),
@@ -84,11 +85,38 @@ pub fn serve(engine: Engine, socket: &str) -> io::Result<()> {
     }
 
     let preparer = engine.preparer();
-    let listener = ListenerOptions::new()
+    // Bind atomically WITHOUT try_overwrite first.  If another process snuck in
+    // and won the race (between our probe and our bind), the create_sync call
+    // returns an AddrInUse/AlreadyExists error — treat that as "another daemon
+    // won" and exit cleanly rather than propagating it as a hard error.
+    let listener = match ListenerOptions::new()
         .name(build_name(socket)?)
-        // No live daemon (checked above); overwrite only a stale socket file.
-        .try_overwrite(true)
-        .create_sync()?;
+        .create_sync()
+    {
+        Ok(l) => l,
+        Err(e)
+            if e.kind() == io::ErrorKind::AddrInUse || e.kind() == io::ErrorKind::AlreadyExists =>
+        {
+            // A second process bound after our probe; it's the sole writer now.
+            return Err(io::Error::new(
+                io::ErrorKind::AddrInUse,
+                format!("a memeora-daemon is already listening on {socket}"),
+            ));
+        }
+        // The socket path exists from a previous (now dead) daemon run.
+        // We confirmed above (probe returned Err) that no live daemon owns it,
+        // so overwriting the stale file is safe.
+        Err(e)
+            if e.kind() == io::ErrorKind::ConnectionRefused
+                || e.kind() == io::ErrorKind::NotFound =>
+        {
+            ListenerOptions::new()
+                .name(build_name(socket)?)
+                .try_overwrite(true)
+                .create_sync()?
+        }
+        Err(e) => return Err(e),
+    };
     let writer = spawn_writer(engine);
     let active = Arc::new(AtomicUsize::new(0));
 
@@ -111,7 +139,17 @@ pub fn serve(engine: Engine, socket: &str) -> io::Result<()> {
                     // `fetch_sub` after the call would be skipped on unwind and leak
                     // the slot until the daemon stops accepting (a zombie at 256).
                     let _slot = ActiveSlot(active);
-                    handle_conn(stream, &writer, &preparer);
+                    // Isolate panics in embedding/extraction so a single bad request
+                    // cannot tear down the whole connection thread and kill the slot
+                    // counter.  The writer thread already has its own catch_unwind;
+                    // this mirrors that guard on the connection side.
+                    if catch_unwind(AssertUnwindSafe(|| {
+                        handle_conn(stream, &writer, &preparer);
+                    }))
+                    .is_err()
+                    {
+                        eprintln!("memeora-daemon: connection handler panicked; connection closed");
+                    }
                 });
             }
             Err(e) => eprintln!("memeora-daemon: accept error: {e}"),

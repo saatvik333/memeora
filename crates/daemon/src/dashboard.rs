@@ -18,7 +18,7 @@ use std::convert::Infallible;
 use std::fmt::Display;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use axum::Json;
 use axum::Router;
@@ -49,10 +49,11 @@ const DEFAULT_GRAPH_CAP: usize = 2000;
 /// Shared dashboard state. Cheap to clone (everything is `Arc`/`Sender`).
 #[derive(Clone)]
 struct AppState {
-    /// Path to the WAL database; each read opens its own read-only connection.
-    db_path: Arc<PathBuf>,
-    /// Embedding dimensionality persisted by the writer store.
-    dim: usize,
+    /// Shared read-only store — opened once at startup so we don't pay the
+    /// connection + migration overhead on every request.  `Mutex` is needed
+    /// because `rusqlite::Connection` is `Send` but not `Sync`; WAL mode
+    /// allows this reader to run concurrently with the daemon's writer.
+    store: Arc<Mutex<SqliteStore>>,
     /// The daemon's IPC socket — for search (needs the embedder) and forget.
     socket: Arc<str>,
     /// Source of [`ChangeEvent`]s for the SSE live stream.
@@ -63,21 +64,24 @@ struct AppState {
 
 /// Build the dashboard router over the given state pieces. Split from [`serve`]
 /// so it can be exercised in tests without binding a socket.
+///
+/// Returns `Err` if the read-only store cannot be opened (e.g. DB not yet
+/// created by the writer).
 fn build_router(
     db_path: PathBuf,
     dim: usize,
     socket: String,
     events: broadcast::Sender<ChangeEvent>,
     graph_cap: usize,
-) -> Router {
+) -> Result<Router, memeora_core::Error> {
+    let store = SqliteStore::open_readonly(&db_path, dim)?;
     let state = AppState {
-        db_path: Arc::new(db_path),
-        dim,
+        store: Arc::new(Mutex::new(store)),
         socket: Arc::from(socket),
         events,
         graph_cap,
     };
-    Router::new()
+    Ok(Router::new()
         .route("/api/health", get(health))
         .route("/api/scopes", get(scopes))
         .route("/api/graph", get(graph))
@@ -88,22 +92,23 @@ fn build_router(
         .route("/api/events", get(events_stream))
         // Everything else: embedded UI assets, with SPA fallback to index.html.
         .fallback(static_asset)
-        .with_state(state)
+        .with_state(state))
 }
 
 /// Serve the dashboard on `addr` until the process exits. `db_path` is the WAL
-/// database path; every read opens a second read-only connection, while `socket`
-/// is the daemon's IPC socket and `events` is the engine's change broadcaster.
+/// database path; `socket` is the daemon's IPC socket and `events` is the
+/// engine's change broadcaster.
 pub async fn serve(
     addr: SocketAddr,
     db_path: PathBuf,
     dim: usize,
     socket: String,
     events: broadcast::Sender<ChangeEvent>,
-) -> std::io::Result<()> {
-    let app = build_router(db_path, dim, socket, events, DEFAULT_GRAPH_CAP);
+) -> Result<(), Box<dyn std::error::Error>> {
+    let app = build_router(db_path, dim, socket, events, DEFAULT_GRAPH_CAP)?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await
+    axum::serve(listener, app).await?;
+    Ok(())
 }
 
 // ---- handlers ---------------------------------------------------------------
@@ -241,18 +246,19 @@ async fn static_asset(uri: Uri) -> Response {
     }
 }
 
-/// Run a read-only store query on a blocking thread, opening a fresh read-only
-/// connection per request so dashboard reads do not serialize behind one mutex.
+/// Run a read-only store query on a blocking thread, reusing the shared store
+/// opened at startup so we don't pay per-request connection + migration cost.
 async fn read<T, F>(st: &AppState, f: F) -> Result<T, ApiError>
 where
     F: FnOnce(&SqliteStore) -> memeora_core::Result<T> + Send + 'static,
     T: Send + 'static,
 {
-    let path = st.db_path.clone();
-    let dim = st.dim;
+    let store = Arc::clone(&st.store);
     tokio::task::spawn_blocking(move || {
-        let store = SqliteStore::open_readonly(path.as_path(), dim).map_err(ApiError::internal)?;
-        f(&store).map_err(ApiError::internal)
+        let guard = store
+            .lock()
+            .map_err(|_| ApiError::internal("store lock poisoned"))?;
+        f(&*guard).map_err(ApiError::internal)
     })
     .await
     .map_err(ApiError::internal)?
@@ -422,16 +428,24 @@ struct ApiError(StatusCode, String);
 
 impl ApiError {
     /// An internal failure (a panicked task, a DB error).
+    ///
+    /// The full error is logged to stderr; only a generic message is sent to
+    /// the client so internal details (file paths, SQL, stack hints) are not
+    /// exposed over HTTP.
     fn internal(e: impl Display) -> Self {
-        ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+        eprintln!("memeora-dashboard: internal error: {e}");
+        ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal error".to_string(),
+        )
     }
 
     /// A failure talking to the daemon over IPC (e.g. it isn't running).
+    ///
+    /// As above: log the detail, send a generic body.
     fn upstream(e: impl Display) -> Self {
-        ApiError(
-            StatusCode::BAD_GATEWAY,
-            format!("daemon request failed: {e}"),
-        )
+        eprintln!("memeora-dashboard: upstream error: {e}");
+        ApiError(StatusCode::BAD_GATEWAY, "upstream error".to_string())
     }
 }
 
@@ -475,6 +489,8 @@ mod tests {
     fn test_app() -> (Router, PathBuf) {
         let (path, store) = test_store();
         let dim = store.dim();
+        // Drop the write store before opening the read-only one in build_router.
+        drop(store);
         let (tx, _) = broadcast::channel(16);
         (
             build_router(
@@ -483,7 +499,8 @@ mod tests {
                 "unused.sock".to_string(),
                 tx,
                 DEFAULT_GRAPH_CAP,
-            ),
+            )
+            .unwrap(),
             path,
         )
     }
