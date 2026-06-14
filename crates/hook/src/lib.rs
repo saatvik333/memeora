@@ -14,6 +14,9 @@ use memeora_proto::MemoryDto;
 use serde_json::Value;
 
 pub use descriptor::{HostDescriptor, InjectStyle};
+// Redaction is owned by the engine (core); re-export so the hook's capture path
+// and the public API keep a single, canonical, whitespace-preserving implementation.
+pub use memeora_core::privacy::redact;
 pub use run::run;
 
 /// Resolve a dotted payload path: object keys, with numeric segments indexing
@@ -50,9 +53,22 @@ pub fn resolve_scope(desc: &HostDescriptor, payload: &Value) -> String {
     project_tag(&dir)
 }
 
-/// The transcript file path per the descriptor, if present.
+/// The transcript file path per the descriptor, if present **and safe to read**.
+///
+/// The path is taken from the host payload using field names declared in a
+/// (possibly untrusted, `--descriptor`-supplied) TOML, then `fs::read_to_string`d
+/// in `capture`. Restrict it to a `.jsonl` file with no `..` traversal so a hostile
+/// descriptor can't turn the capture hook into an arbitrary-file reader.
 pub fn transcript_path(desc: &HostDescriptor, payload: &Value) -> Option<String> {
-    first_field(payload, &desc.transcript_fields).map(String::from)
+    let path = first_field(payload, &desc.transcript_fields)?;
+    is_safe_transcript_path(path).then(|| path.to_string())
+}
+
+/// A transcript path is safe to read iff it is a `.jsonl` file with no parent-dir
+/// traversal. Conservative on purpose: capture is best-effort, so an unsafe path
+/// yields no capture rather than an error.
+fn is_safe_transcript_path(path: &str) -> bool {
+    !path.contains("..") && path.to_ascii_lowercase().ends_with(".jsonl")
 }
 
 /// Whether an inject event should actually inject. Hosts with an
@@ -60,9 +76,11 @@ pub fn transcript_path(desc: &HostDescriptor, payload: &Value) -> Option<String>
 /// first invocation; others always inject. A missing field defaults to injecting.
 pub fn should_inject(desc: &HostDescriptor, payload: &Value) -> bool {
     match &desc.invocation_gate_field {
+        // Accept the gate value as an integer OR a float: some hosts emit
+        // `invocationNum` as `1.0`, which `as_u64` alone would miss → the gate would
+        // fail open and inject on every turn.
         Some(field) => get_path(payload, field)
-            .and_then(Value::as_u64)
-            .map(|n| n == 1)
+            .map(|v| v.as_u64() == Some(1) || v.as_f64() == Some(1.0))
             .unwrap_or(true),
         None => true,
     }
@@ -150,92 +168,6 @@ pub fn extract_text(value: &Value) -> String {
     }
 }
 
-/// Best-effort redaction of obvious secrets before a transcript is persisted.
-///
-/// Conservative and heuristic (not a substitute for the user not pasting secrets):
-/// masks known credential-prefixed tokens, `key=value`/`key: value` pairs with a
-/// sensitive key, and long high-entropy blobs.
-pub fn redact(text: &str) -> String {
-    text.lines()
-        .map(|line| {
-            // Split on ALL whitespace (not just ' '): a tab-indented or
-            // tab-separated token must still be inspected.
-            line.split_whitespace()
-                .map(redact_word)
-                .collect::<Vec<_>>()
-                .join(" ")
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// Sensitive key substrings for `key=value` redaction.
-const SENSITIVE_KEYS: &[&str] = &[
-    "password",
-    "passwd",
-    "secret",
-    "token",
-    "api_key",
-    "apikey",
-    "access_key",
-    "auth",
-];
-
-/// Known secret token prefixes (GitHub, OpenAI, AWS, Google, Slack, GitLab).
-const SECRET_PREFIXES: &[&str] = &[
-    "sk-",
-    "ghp_",
-    "gho_",
-    "ghu_",
-    "ghs_",
-    "github_pat_",
-    "xoxb-",
-    "xoxp-",
-    "AKIA",
-    "AIza",
-    "glpat-",
-];
-
-/// Redact a single whitespace-delimited word, preserving non-secret text.
-///
-/// Handles tokens wrapped in punctuation (quotes, brackets, trailing commas) by
-/// inspecting the alphanumeric core, so `"sk-…",` and a tab-indented `\tsk-…` are
-/// caught — not just a bare space-delimited token.
-fn redact_word(word: &str) -> String {
-    // `key=value` / `key: value` with a sensitive key → mask only the value.
-    if let Some(idx) = word.find(['=', ':']) {
-        let (key, rest) = word.split_at(idx);
-        let value = &rest[1..];
-        let key_core = key
-            .trim_matches(|c: char| !c.is_ascii_alphanumeric())
-            .to_ascii_lowercase();
-        if !value.is_empty() && SENSITIVE_KEYS.iter().any(|s| key_core.contains(s)) {
-            // `rest` starts with the (1-byte ASCII) separator we matched.
-            return format!("{key}{}[REDACTED]", &rest[..1]);
-        }
-    }
-    // Strip surrounding non-alphanumerics before the prefix/entropy check, then
-    // redact just the core so wrapping punctuation (and thus JSON shape) survives.
-    let core = word.trim_matches(|c: char| !c.is_ascii_alphanumeric());
-    if !core.is_empty() && looks_secret(core) {
-        return word.replace(core, "[REDACTED]");
-    }
-    word.to_string()
-}
-
-/// Whether a standalone token looks like a credential.
-fn looks_secret(word: &str) -> bool {
-    if SECRET_PREFIXES.iter().any(|p| word.starts_with(p)) {
-        return true;
-    }
-    word.len() >= 32
-        && word
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "-_+/=.".contains(c))
-        && word.chars().any(|c| c.is_ascii_alphabetic())
-        && word.chars().any(|c| c.is_ascii_digit())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,6 +224,15 @@ mod tests {
             &anti,
             &serde_json::json!({ "invocationNum": 2 })
         ));
+        // A float-typed gate value (some hosts emit `1.0`) must still gate correctly.
+        assert!(should_inject(
+            &anti,
+            &serde_json::json!({ "invocationNum": 1.0 })
+        ));
+        assert!(!should_inject(
+            &anti,
+            &serde_json::json!({ "invocationNum": 2.0 })
+        ));
         // Missing gate field → default to injecting.
         assert!(should_inject(&anti, &serde_json::json!({})));
         // Claude has no gate → always injects.
@@ -304,6 +245,35 @@ mod tests {
         assert_eq!(
             transcript_path(&antigravity(), &payload).as_deref(),
             Some("/t/a.jsonl")
+        );
+    }
+
+    #[test]
+    fn transcript_path_rejects_unsafe_paths() {
+        let anti = antigravity();
+        // A non-.jsonl target and parent-dir traversal are refused, so a hostile
+        // descriptor can't read arbitrary files via the capture hook.
+        assert!(
+            transcript_path(
+                &anti,
+                &serde_json::json!({ "transcriptPath": "/etc/passwd" })
+            )
+            .is_none()
+        );
+        assert!(
+            transcript_path(
+                &anti,
+                &serde_json::json!({ "transcriptPath": "/t/../../etc/secrets.jsonl" })
+            )
+            .is_none()
+        );
+        // A normal .jsonl path is still accepted.
+        assert!(
+            transcript_path(
+                &anti,
+                &serde_json::json!({ "transcriptPath": "/t/a.jsonl" })
+            )
+            .is_some()
         );
     }
 
