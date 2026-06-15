@@ -8,7 +8,7 @@
 
 use std::error::Error;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use memeora_core::embed::fastembed::FastEmbedder;
 use memeora_core::{EmbeddingProvider, HeuristicExtractor, SqliteStore};
@@ -56,6 +56,26 @@ fn dashboard_addr() -> Option<SocketAddr> {
     }
 }
 
+/// Whether the model cache already holds weights (any entry present). A first-run
+/// download is only attempted when this is false.
+fn model_cache_populated(dir: &Path) -> bool {
+    std::fs::read_dir(dir)
+        .map(|mut entries| entries.next().is_some())
+        .unwrap_or(false)
+}
+
+/// Explicit opt-in to a one-time first-run model download. Offline by default, so the
+/// daemon never makes an unconsented network call to fetch weights ("no required
+/// network / never a silent fallback").
+fn model_download_allowed() -> bool {
+    std::env::var("MEMEORA_ALLOW_MODEL_DOWNLOAD")
+        .map(|v| {
+            let v = v.trim();
+            !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(false)
+}
+
 /// Load the model + store once, optionally start the dashboard, then serve IPC
 /// (blocks for the process lifetime — the writer-actor owns the sole DB write conn).
 pub fn run() -> Result<(), Box<dyn Error>> {
@@ -85,7 +105,23 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         );
     }
 
-    // Local, no-API-key embedder (downloads weights to the cache on first run).
+    // Offline-first: don't silently reach out to HuggingFace on first run. If the
+    // weights aren't already cached and the user hasn't opted into a one-time
+    // download, refuse with an actionable message rather than making an unconsented
+    // network call (the "no required network / never a silent fallback" invariant).
+    if !model_cache_populated(&model_cache) && !model_download_allowed() {
+        return Err(format!(
+            "embedding model not found in {} and a first-run download is not enabled \
+             (offline by default). Either set MEMEORA_ALLOW_MODEL_DOWNLOAD=1 to fetch it \
+             once (~130 MB from HuggingFace), or provide an offline bundle there and point \
+             MEMEORA_MODELS_DIR at it (see `memeora models bundle`).",
+            model_cache.display()
+        )
+        .into());
+    }
+
+    // Local, no-API-key embedder (downloads weights to the cache on first run, only
+    // when allowed by the consent check above).
     let embedder = FastEmbedder::bge_small(Some(model_cache))?;
     let dim = embedder.dim();
     let store = SqliteStore::open(&db_path, dim)?;

@@ -92,9 +92,11 @@ powershell -ExecutionPolicy ByPass -c "irm https://github.com/saatvik333/memeora
 ```
 
 Or grab a prebuilt archive (with its `.sha256`) from the [releases page](https://github.com/saatvik333/memeora/releases).
-The first daemon run downloads the embedding model to `~/.memeora/models`; for an
-**air-gapped** install, drop the model files there (or point `MEMEORA_MODELS_DIR` at a
-bundle) and verify integrity with `memeora models verify`.
+On first run the daemon needs the embedding model. It is **offline by default and will
+not download silently**: set `MEMEORA_ALLOW_MODEL_DOWNLOAD=1` to fetch it once
+(~130 MB from HuggingFace) into `~/.memeora/models`, or — for an **air-gapped** install —
+drop the model files there (or point `MEMEORA_MODELS_DIR` at a bundle) and verify
+integrity with `memeora models verify`.
 
 ## Build (from source)
 ```sh
