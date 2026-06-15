@@ -73,6 +73,24 @@ builds a knowledge graph, and recalls the right context at the right time. It's 
 
 ## Install
 
+### Guided setup (recommended)
+
+One interactive command installs the binaries, handles the embedding model, wires
+memeora into your coding tools (Claude Code / Codex / Antigravity / OpenCode), and
+optionally starts the daemon — you choose each step. It reads prompts from your
+terminal even under `curl | sh`, never uses `sudo`, backs up any file it edits, and
+is safe to re-run:
+
+```sh
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/saatvik333/memeora/main/scripts/install.sh | sh
+```
+
+For CI / non-interactive use, pass flags or `MEMEORA_*` env through the pipe, e.g.
+`… | sh -s -- --yes --adapters=claude,codex --offline --no-daemon`. Run with
+`--help` (or read [`scripts/install.sh`](scripts/install.sh)) for every option.
+
+### Just the binaries
+
 Released builds ship every binary (`memeora`, `memeora-daemon`, `memeora-hook`,
 `memeora-mcp`) in a single installer. Pick one:
 
