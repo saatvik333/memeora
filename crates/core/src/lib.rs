@@ -25,7 +25,7 @@ pub use dynamics::decayed_strength;
 pub use embed::{CachingEmbedder, EmbeddingProvider, EmbeddingSpace};
 pub use entity::extract_entities;
 pub use error::{Error, Result};
-pub use extract::{Candidate, Extractor, HeuristicExtractor};
+pub use extract::{Candidate, Extractor, HeuristicExtractor, LlmConfig, LlmExtractor};
 pub use ingest::{
     IngestOutcome, IngestParams, PreparedCandidate, embed_candidates, ingest, ingest_candidates,
     ingest_prepared,

@@ -8,8 +8,10 @@
 //! (see `docs/ARCHITECTURE.md`).
 
 pub mod heuristic;
+pub mod llm;
 
 pub use heuristic::HeuristicExtractor;
+pub use llm::{LlmConfig, LlmExtractor};
 
 use crate::Result;
 use crate::store::{Memory, MemoryKind};

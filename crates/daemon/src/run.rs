@@ -11,7 +11,9 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use memeora_core::embed::fastembed::FastEmbedder;
-use memeora_core::{EmbeddingProvider, HeuristicExtractor, SqliteStore};
+use memeora_core::{
+    EmbeddingProvider, Extractor, HeuristicExtractor, LlmConfig, LlmExtractor, SqliteStore,
+};
 use memeora_proto::{DEFAULT_SOCKET, PROTOCOL_VERSION};
 use tokio::sync::broadcast;
 
@@ -129,12 +131,29 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     // Change broadcaster for the dashboard's live (SSE) stream. Cloned to the
     // engine (publisher) and the dashboard (subscriber); harmless if no dashboard.
     let (events_tx, _events_rx) = broadcast::channel(256);
-    let engine = Engine::new(
-        store,
-        Box::new(embedder),
-        Box::new(HeuristicExtractor::default()),
-    )
-    .with_events(events_tx.clone());
+    // Extractor tier: the opt-in LLM (MEMEORA_LLM_ENDPOINT) when set AND permitted by
+    // the consent policy, otherwise the heuristic floor. A remote endpoint needs
+    // explicit MEMEORA_LLM_ALLOW_REMOTE=1; the LLM extractor falls back to the heuristic
+    // on any failure, so this never makes the LLM a hard dependency.
+    let extractor: Box<dyn Extractor> = match LlmConfig::from_env() {
+        Some(cfg) if cfg.is_allowed() => {
+            eprintln!(
+                "memeora-daemon: LLM extractor enabled ({} @ {})",
+                cfg.model, cfg.endpoint
+            );
+            Box::new(LlmExtractor::new(cfg))
+        }
+        Some(cfg) => {
+            eprintln!(
+                "memeora-daemon: MEMEORA_LLM_ENDPOINT {} is remote; set \
+                 MEMEORA_LLM_ALLOW_REMOTE=1 to consent. Using the heuristic extractor.",
+                cfg.endpoint
+            );
+            Box::new(HeuristicExtractor::default())
+        }
+        None => Box::new(HeuristicExtractor::default()),
+    };
+    let engine = Engine::new(store, Box::new(embedder), extractor).with_events(events_tx.clone());
 
     let socket = std::env::var("MEMEORA_SOCKET").unwrap_or_else(|_| DEFAULT_SOCKET.to_string());
 

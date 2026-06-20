@@ -1,0 +1,390 @@
+//! Tier-2/3 opt-in LLM extractor (VISION "Adapts" ladder).
+//!
+//! Talks to an **OpenAI-compatible** chat-completions endpoint to extract richer
+//! memories than the heuristic floor. **Off by default** — enabled only by explicit
+//! config (the daemon reads `MEMEORA_LLM_ENDPOINT`). Policy in one boolean: a
+//! **local** endpoint (loopback) is allowed under local-first; a **remote** one
+//! (Tier-3 BYOK) requires explicit consent ([`LlmConfig::allow_remote`]) and is
+//! never used silently.
+//!
+//! It **never becomes a hard dependency**: any failure — disabled, disallowed,
+//! network error, malformed response, or empty result — falls back to the
+//! [`HeuristicExtractor`], so "no required LLM" stays literally true. LLM output is
+//! graph-self-repaired (VISION "Heals"): every proposed candidate is trimmed,
+//! dropped if empty, and its kind coerced to a valid value.
+//!
+//! The bundled [`HttpTransport`] is intentionally minimal — loopback plain HTTP with
+//! `Connection: close` (read to EOF), no TLS or chunked decoding.
+// ponytail: that transport covers exactly the local-first (loopback) case; for an
+// external TLS endpoint, implement LlmTransport with a real HTTP client behind a feature.
+
+use std::io::{Read, Write};
+use std::net::TcpStream;
+use std::time::Duration;
+
+use serde::Deserialize;
+
+use crate::error::{Error, Result};
+use crate::extract::{Candidate, Extractor, HeuristicExtractor};
+use crate::store::MemoryKind;
+
+const SYSTEM_PROMPT: &str = "You extract durable memories from text for a personal memory engine. \
+Return ONLY a compact JSON array; each element is {\"content\": string, \"kind\": one of \"fact\", \
+\"preference\", \"episode\"}. Capture stable facts, user preferences, and notable episodes; \
+ignore chit-chat. No prose, no code fences.";
+
+/// LLM-extracted confidence (above the heuristic's fact/preference score, below an
+/// explicit user save cue).
+const LLM_CONFIDENCE: f32 = 0.9;
+
+/// Config for the opt-in LLM extractor tier.
+#[derive(Debug, Clone)]
+pub struct LlmConfig {
+    /// OpenAI-compatible base URL, e.g. `http://localhost:11434/v1`.
+    pub endpoint: String,
+    /// Model name, e.g. `llama3.1`.
+    pub model: String,
+    /// Explicit consent to use a NON-local (remote) endpoint. Local needs none.
+    pub allow_remote: bool,
+}
+
+impl LlmConfig {
+    /// Read config from the environment, or `None` when `MEMEORA_LLM_ENDPOINT` is
+    /// unset/empty (the default — the tier is off). `MEMEORA_LLM_MODEL` defaults to a
+    /// common local model; `MEMEORA_LLM_ALLOW_REMOTE=1` consents to a remote endpoint.
+    pub fn from_env() -> Option<LlmConfig> {
+        let endpoint = std::env::var("MEMEORA_LLM_ENDPOINT").ok()?;
+        if endpoint.trim().is_empty() {
+            return None;
+        }
+        Some(LlmConfig {
+            endpoint,
+            model: std::env::var("MEMEORA_LLM_MODEL").unwrap_or_else(|_| "llama3.1".to_string()),
+            allow_remote: std::env::var("MEMEORA_LLM_ALLOW_REMOTE")
+                .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true")),
+        })
+    }
+
+    /// Whether the endpoint host is loopback/local.
+    pub fn endpoint_is_local(&self) -> bool {
+        host_is_local(&self.endpoint)
+    }
+
+    /// Whether the consent policy permits this endpoint: local is always allowed; a
+    /// remote endpoint only with explicit [`allow_remote`](LlmConfig::allow_remote).
+    pub fn is_allowed(&self) -> bool {
+        self.endpoint_is_local() || self.allow_remote
+    }
+}
+
+/// Whether `url`'s host is loopback (so it's allowed under local-first).
+fn host_is_local(url: &str) -> bool {
+    let after_scheme = url.split("://").nth(1).unwrap_or(url);
+    let authority = after_scheme.split('/').next().unwrap_or("");
+    // Drop any userinfo, then take the host (before the port); handle [::1]:port.
+    let hostport = authority.rsplit('@').next().unwrap_or(authority);
+    let host = if let Some(rest) = hostport.strip_prefix('[') {
+        rest.split(']').next().unwrap_or(rest)
+    } else {
+        hostport.split(':').next().unwrap_or(hostport)
+    };
+    matches!(host, "localhost" | "127.0.0.1" | "::1") || host.ends_with(".localhost")
+}
+
+/// Sends a JSON POST to `url` and returns the response body. Abstracted so the
+/// extractor logic is testable without a live server.
+pub trait LlmTransport: Send + Sync {
+    /// POST `body` (JSON) to `url`, returning the raw response body.
+    fn post_json(&self, url: &str, body: &str) -> Result<String>;
+}
+
+/// Minimal blocking HTTP/1.1 transport for a loopback OpenAI-compatible server.
+pub struct HttpTransport {
+    timeout: Duration,
+}
+
+impl Default for HttpTransport {
+    fn default() -> Self {
+        HttpTransport {
+            timeout: Duration::from_secs(30),
+        }
+    }
+}
+
+impl LlmTransport for HttpTransport {
+    fn post_json(&self, url: &str, body: &str) -> Result<String> {
+        let (host, port, path) = split_url(url)?;
+        let mut stream = TcpStream::connect((host.as_str(), port))
+            .map_err(|e| Error::Llm(format!("connect {host}:{port}: {e}")))?;
+        stream.set_read_timeout(Some(self.timeout)).ok();
+        stream.set_write_timeout(Some(self.timeout)).ok();
+        let request = format!(
+            "POST {path} HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream
+            .write_all(request.as_bytes())
+            .map_err(|e| Error::Llm(format!("write: {e}")))?;
+        let mut raw = String::new();
+        stream
+            .read_to_string(&mut raw)
+            .map_err(|e| Error::Llm(format!("read: {e}")))?;
+        // `Connection: close` ⇒ the server sent one non-chunked response then closed,
+        // so the body is everything after the header terminator.
+        raw.split_once("\r\n\r\n")
+            .map(|(_, body)| body.to_string())
+            .ok_or_else(|| Error::Llm("malformed HTTP response (no header/body split)".into()))
+    }
+}
+
+/// Split `http://host[:port]/path` into `(host, port, path)`. Port defaults to 80.
+/// Only `http://` (loopback) is supported — TLS is out of the minimal transport's scope.
+fn split_url(url: &str) -> Result<(String, u16, String)> {
+    let rest = url.strip_prefix("http://").ok_or_else(|| {
+        Error::Llm(format!(
+            "only http:// (loopback) endpoints are supported by the built-in transport, got {url:?}"
+        ))
+    })?;
+    let (authority, path) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, "/"),
+    };
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((h, p)) => (h.to_string(), p.parse().unwrap_or(80)),
+        None => (authority.to_string(), 80),
+    };
+    Ok((host, port, path.to_string()))
+}
+
+/// The opt-in LLM extractor. Falls back to the heuristic floor on any failure.
+pub struct LlmExtractor {
+    config: LlmConfig,
+    transport: Box<dyn LlmTransport>,
+    fallback: HeuristicExtractor,
+}
+
+impl LlmExtractor {
+    /// Build with the default loopback HTTP transport.
+    pub fn new(config: LlmConfig) -> Self {
+        LlmExtractor::with_transport(config, Box::new(HttpTransport::default()))
+    }
+
+    /// Build with a custom transport (used in tests, or to support TLS/remote later).
+    pub fn with_transport(config: LlmConfig, transport: Box<dyn LlmTransport>) -> Self {
+        LlmExtractor {
+            config,
+            transport,
+            fallback: HeuristicExtractor::default(),
+        }
+    }
+
+    /// Attempt LLM extraction; returns an empty vec on any disallowed/failed path.
+    fn try_llm(&self, text: &str) -> Vec<Candidate> {
+        if !self.config.is_allowed() {
+            return Vec::new(); // remote without consent → never call out
+        }
+        let url = format!(
+            "{}/chat/completions",
+            self.config.endpoint.trim_end_matches('/')
+        );
+        let body = build_chat_request(&self.config.model, text);
+        match self.transport.post_json(&url, &body) {
+            Ok(resp) => parse_content(&resp)
+                .map(|c| parse_candidates(&c))
+                .unwrap_or_default(),
+            Err(_) => Vec::new(),
+        }
+    }
+}
+
+impl Extractor for LlmExtractor {
+    fn extract(&self, text: &str) -> Result<Vec<Candidate>> {
+        let candidates = self.try_llm(text);
+        if candidates.is_empty() {
+            // Disabled, disallowed, network/parse failure, or nothing extracted: the
+            // heuristic floor keeps "no required LLM" literally true.
+            self.fallback.extract(text)
+        } else {
+            Ok(candidates)
+        }
+    }
+}
+
+/// Build the OpenAI-compatible chat-completions request body.
+fn build_chat_request(model: &str, text: &str) -> String {
+    serde_json::json!({
+        "model": model,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": text},
+        ],
+        "temperature": 0.0,
+        "stream": false,
+    })
+    .to_string()
+}
+
+/// Pull `choices[0].message.content` out of a completion response, or `None` if the
+/// shape is unexpected.
+fn parse_content(response_body: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(response_body).ok()?;
+    v.get("choices")?
+        .get(0)?
+        .get("message")?
+        .get("content")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// Raw element of the model's JSON array, before self-repair.
+#[derive(Deserialize)]
+struct RawCandidate {
+    content: String,
+    #[serde(default)]
+    kind: String,
+}
+
+/// Parse the model's JSON-array output into self-repaired candidates. Returns an
+/// empty vec (→ heuristic fallback) if the output isn't the expected JSON array.
+fn parse_candidates(content: &str) -> Vec<Candidate> {
+    let cleaned = strip_code_fences(content);
+    match serde_json::from_str::<Vec<RawCandidate>>(cleaned) {
+        Ok(items) => items.into_iter().filter_map(repair_candidate).collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Graph self-repair for one proposed candidate: trim, drop-if-empty, coerce kind to
+/// a valid [`MemoryKind`] (invalid → `Fact`).
+fn repair_candidate(raw: RawCandidate) -> Option<Candidate> {
+    let content = raw.content.trim().to_string();
+    if content.is_empty() {
+        return None;
+    }
+    Some(Candidate {
+        content,
+        kind: MemoryKind::from_str_lossy(&raw.kind.to_lowercase()),
+        expires_at: None,
+        confidence: LLM_CONFIDENCE,
+    })
+}
+
+/// Strip a leading ```json / ``` fence and trailing ``` the model may wrap JSON in.
+fn strip_code_fences(s: &str) -> &str {
+    let mut t = s.trim();
+    if let Some(rest) = t.strip_prefix("```json").or_else(|| t.strip_prefix("```")) {
+        t = rest.trim();
+    }
+    if let Some(rest) = t.strip_suffix("```") {
+        t = rest.trim();
+    }
+    t
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct MockTransport(String);
+    impl LlmTransport for MockTransport {
+        fn post_json(&self, _url: &str, _body: &str) -> Result<String> {
+            Ok(self.0.clone())
+        }
+    }
+
+    struct FailTransport;
+    impl LlmTransport for FailTransport {
+        fn post_json(&self, _url: &str, _body: &str) -> Result<String> {
+            Err(Error::Llm("boom".into()))
+        }
+    }
+
+    fn cfg(endpoint: &str, allow_remote: bool) -> LlmConfig {
+        LlmConfig {
+            endpoint: endpoint.into(),
+            model: "m".into(),
+            allow_remote,
+        }
+    }
+
+    fn completion(content: &str) -> String {
+        serde_json::json!({ "choices": [{ "message": { "content": content } }] }).to_string()
+    }
+
+    #[test]
+    fn local_allowed_remote_needs_consent() {
+        assert!(cfg("http://localhost:11434/v1", false).is_allowed());
+        assert!(cfg("http://127.0.0.1:1234", false).is_allowed());
+        assert!(cfg("http://[::1]:8080/v1", false).is_allowed());
+        assert!(!cfg("http://api.openai.com/v1", false).is_allowed());
+        assert!(cfg("http://api.openai.com/v1", true).is_allowed());
+    }
+
+    #[test]
+    fn parses_and_repairs_llm_candidates() {
+        let content = "```json\n[{\"content\":\"User prefers dark mode\",\"kind\":\"preference\"},\
+                       {\"content\":\"   \",\"kind\":\"fact\"},\
+                       {\"content\":\"Met Alex\",\"kind\":\"bogus\"}]\n```";
+        let ex = LlmExtractor::with_transport(
+            cfg("http://localhost:1/v1", false),
+            Box::new(MockTransport(completion(content))),
+        );
+        let cands = ex.extract("whatever").unwrap();
+        assert_eq!(cands.len(), 2, "empty-content candidate dropped");
+        assert_eq!(cands[0].kind, MemoryKind::Preference);
+        assert_eq!(
+            cands[1].kind,
+            MemoryKind::Fact,
+            "invalid kind coerced to fact"
+        );
+    }
+
+    #[test]
+    fn falls_back_to_heuristic_on_transport_error() {
+        let ex = LlmExtractor::with_transport(
+            cfg("http://localhost:1/v1", false),
+            Box::new(FailTransport),
+        );
+        let cands = ex.extract("I prefer dark mode in my editor").unwrap();
+        assert_eq!(
+            cands.len(),
+            1,
+            "heuristic floor still extracts the preference"
+        );
+        assert_eq!(cands[0].kind, MemoryKind::Preference);
+    }
+
+    #[test]
+    fn disallowed_remote_never_calls_out() {
+        struct PanicTransport;
+        impl LlmTransport for PanicTransport {
+            fn post_json(&self, _url: &str, _body: &str) -> Result<String> {
+                panic!("transport must not be called for a disallowed endpoint")
+            }
+        }
+        let ex = LlmExtractor::with_transport(
+            cfg("http://api.openai.com/v1", false),
+            Box::new(PanicTransport),
+        );
+        let cands = ex.extract("I prefer dark mode in my editor").unwrap();
+        assert_eq!(cands.len(), 1, "heuristic floor applies, no network call");
+    }
+
+    #[test]
+    fn split_url_parses_host_port_path() {
+        assert_eq!(
+            split_url("http://localhost:11434/v1/chat/completions").unwrap(),
+            (
+                "localhost".to_string(),
+                11434,
+                "/v1/chat/completions".to_string()
+            )
+        );
+        assert_eq!(
+            split_url("http://127.0.0.1/x").unwrap(),
+            ("127.0.0.1".to_string(), 80, "/x".to_string())
+        );
+        assert!(split_url("https://x/y").is_err(), "TLS is out of scope");
+    }
+}

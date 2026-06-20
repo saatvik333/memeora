@@ -19,6 +19,9 @@ pub enum Error {
     /// An embedding provider failed (model load, inference, or a poisoned lock).
     /// Carries a message because the underlying error type varies by backend.
     Embedding(String),
+    /// The opt-in LLM extractor's transport/response failed. Non-fatal at the
+    /// ingest layer (the extractor falls back to the heuristic); surfaced for logging.
+    Llm(String),
 }
 
 impl fmt::Display for Error {
@@ -30,6 +33,7 @@ impl fmt::Display for Error {
                 write!(f, "embedding dim mismatch: expected {expected}, got {got}")
             }
             Error::Embedding(msg) => write!(f, "embedding error: {msg}"),
+            Error::Llm(msg) => write!(f, "llm extractor error: {msg}"),
         }
     }
 }
@@ -39,7 +43,7 @@ impl std::error::Error for Error {
         match self {
             Error::Sqlite(e) => Some(e),
             Error::Migration(e) => Some(e),
-            Error::DimMismatch { .. } | Error::Embedding(_) => None,
+            Error::DimMismatch { .. } | Error::Embedding(_) | Error::Llm(_) => None,
         }
     }
 }

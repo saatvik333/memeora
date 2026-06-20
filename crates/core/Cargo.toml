@@ -20,4 +20,8 @@ rusqlite_migration = "2.6.0"
 sha2 = "0.11.0"
 sqlite-vec = "0.1.9"
 dirs.workspace = true
+# Opt-in LLM extractor tier: JSON request/response for the OpenAI-compatible endpoint.
+# Already in the workspace tree (hook/daemon/mcp), so no new license for cargo-deny.
+serde = { workspace = true }
+serde_json = { workspace = true }
 fastembed = { version = "5", optional = true }
