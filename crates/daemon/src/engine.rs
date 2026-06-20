@@ -235,8 +235,13 @@ impl Engine {
             },
 
             Prepared::Ingest { scope, candidates } => {
-                let outcome =
-                    ingest_prepared(&mut self.store, &scope, candidates, &self.ingest_params)?;
+                // One transaction for the whole batch: a mid-batch failure rolls back
+                // every candidate rather than leaving a partial write the client was
+                // told failed (which a retry would then double-reinforce).
+                let params = self.ingest_params.clone();
+                let outcome = self
+                    .store
+                    .transaction(|s| ingest_prepared(s, &scope, candidates, &params))?;
                 self.profiles.invalidate(&scope);
                 self.emit(&scope, "ingested");
                 Response::Ingested {
@@ -250,12 +255,12 @@ impl Engine {
                 candidate,
                 embedding,
             } => {
-                let outcome = ingest_prepared(
-                    &mut self.store,
-                    &scope,
-                    vec![(candidate, embedding)],
-                    &self.ingest_params,
-                )?;
+                // Atomic insert + edge-linking (the new memory's `extends` edges are
+                // separate writes) so an `add` is all-or-nothing too.
+                let params = self.ingest_params.clone();
+                let outcome = self.store.transaction(|s| {
+                    ingest_prepared(s, &scope, vec![(candidate, embedding)], &params)
+                })?;
                 self.profiles.invalidate(&scope);
                 self.emit(&scope, "added");
                 // The single memory was either inserted or reinforced an existing one;

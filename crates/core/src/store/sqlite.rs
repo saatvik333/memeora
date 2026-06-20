@@ -175,6 +175,30 @@ impl SqliteStore {
 
         Ok(GraphData { nodes, edges })
     }
+
+    /// Run `f` inside a single SQLite transaction so a multi-write batch is
+    /// all-or-nothing: any error rolls the whole batch back, leaving no partial
+    /// writes. The store's own write methods (`upsert`/`forget`) use SAVEPOINTs,
+    /// which nest correctly inside this outer transaction and also work standalone,
+    /// so calling them through `f` keeps the batch atomic.
+    pub fn transaction<R>(&mut self, f: impl FnOnce(&mut Self) -> Result<R>) -> Result<R> {
+        // Raw BEGIN/COMMIT rather than a held `Transaction` guard, so `f` can still
+        // take `&mut self` and call the normal write methods. IMMEDIATE takes the
+        // write lock up front — right for the sole-writer daemon (no mid-batch lock
+        // upgrade that could fail with SQLITE_BUSY).
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        match f(self) {
+            Ok(value) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(value)
+            }
+            Err(err) => {
+                // Best-effort rollback; surface the original error, not a rollback one.
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(err)
+            }
+        }
+    }
 }
 
 /// Build a safe FTS5 `MATCH` expression from arbitrary user text.
@@ -239,7 +263,9 @@ impl VectorStore for SqliteStore {
                 got: memory.embedding.len(),
             });
         }
-        let tx = self.conn.transaction()?;
+        // SAVEPOINT (not BEGIN) so this nests inside `SqliteStore::transaction`'s
+        // batch when present, and acts as its own transaction when called alone.
+        let tx = self.conn.savepoint()?;
         let existing_rowid = tx
             .query_row(
                 "SELECT rowid FROM memories WHERE id = ?1",
@@ -456,7 +482,9 @@ impl VectorStore for SqliteStore {
     }
 
     fn forget(&mut self, id: &str) -> Result<()> {
-        let tx = self.conn.transaction()?;
+        // SAVEPOINT (not BEGIN) so this nests inside `SqliteStore::transaction`'s
+        // batch when present, and acts as its own transaction when called alone.
+        let tx = self.conn.savepoint()?;
         // Remove the vector so a forgotten memory can't occupy a KNN top-k slot
         // (vec0 applies its `k` limit before the outer `is_latest` filter). The row
         // is kept (is_latest = 0) so `get` still resolves it and the edges survive.

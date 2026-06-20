@@ -519,4 +519,35 @@ mod tests {
         assert_eq!(out, IngestOutcome::default());
         assert_eq!(store.count("t").unwrap(), 0);
     }
+
+    #[test]
+    fn batch_ingest_rolls_back_on_mid_batch_failure() {
+        // A mid-batch failure (2nd candidate carries a wrong-dim embedding) must roll
+        // the whole batch back through `SqliteStore::transaction` — the 1st candidate
+        // must NOT be left committed (which a retry would then double-reinforce).
+        use crate::store::MemoryKind;
+        let mut store = SqliteStore::open_in_memory(3).unwrap();
+        let tag = "t";
+        let cand = |content: &str, kind| Candidate {
+            content: content.to_string(),
+            kind,
+            expires_at: None,
+            confidence: 1.0,
+        };
+        let good = (
+            cand("I prefer dark mode", MemoryKind::Preference),
+            vec![1.0, 0.0, 0.0],
+        );
+        let bad = (cand("We use SQLite", MemoryKind::Fact), vec![1.0, 0.0]); // dim 2 ≠ 3
+
+        let params = IngestParams::default();
+        let result = store.transaction(|s| ingest_prepared(s, tag, vec![good, bad], &params));
+
+        assert!(result.is_err(), "a wrong-dim candidate must fail the batch");
+        assert_eq!(
+            store.count(tag).unwrap(),
+            0,
+            "partial batch must roll back — no memory left committed"
+        );
+    }
 }
