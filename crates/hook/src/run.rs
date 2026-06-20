@@ -16,8 +16,8 @@ use serde_json::Value;
 
 use crate::descriptor::{self, HostDescriptor};
 use crate::{
-    capture_ack, format_context, redact, render_inject, resolve_scope, should_inject,
-    transcript_path, transcript_to_text,
+    capture_ack, format_context, render_inject, resolve_scope, sanitize, session_capture,
+    should_inject, transcript_path,
 };
 
 #[derive(Parser)]
@@ -117,7 +117,11 @@ fn capture(socket: &str, scope: &str, desc: &HostDescriptor, payload: &Value) {
     let Ok(jsonl) = std::fs::read_to_string(&path) else {
         return;
     };
-    let text = redact(&transcript_to_text(&jsonl, 40));
+    // Full sanitize (strip <private> + redact) here too, not just at the engine:
+    // defense-in-depth, idempotent, and it keeps capture testable without a daemon.
+    // session_capture derives file/command activity (not raw tool output), so the
+    // session's work is understood without storing attacker-influenceable dumps.
+    let text = sanitize(&session_capture(&jsonl, 40));
     if text.trim().is_empty() {
         return;
     }

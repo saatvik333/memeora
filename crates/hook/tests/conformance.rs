@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 
 use memeora_core::container_tag::project_tag;
 use memeora_hook::{
-    capture_ack, descriptor, redact, render_inject, resolve_scope, should_inject, transcript_path,
-    transcript_to_text,
+    capture_ack, descriptor, render_inject, resolve_scope, sanitize, session_capture,
+    should_inject, transcript_path,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -46,7 +46,8 @@ struct Expect {
     /// The capture ack, as parsed JSON.
     ack_json: Option<Value>,
     /// Raw transcript JSONL to push through the capture pipeline
-    /// (`redact(transcript_to_text(..))`), exercising parsing + redaction.
+    /// (`sanitize(session_capture(..))`), exercising parsing + activity derivation
+    /// + sanitization.
     transcript_jsonl: Option<String>,
     /// Substrings the captured (post-redaction) text MUST contain.
     captured_contains: Option<Vec<String>>,
@@ -116,7 +117,7 @@ fn check(path: &Path) {
     // exactly what the hook persists, so an adapter author can assert their host's
     // transcripts parse and that seeded secrets never survive redaction.
     if let Some(jsonl) = &fx.expect.transcript_jsonl {
-        let captured = redact(&transcript_to_text(jsonl, 40));
+        let captured = sanitize(&session_capture(jsonl, 40));
         for needle in fx.expect.captured_contains.iter().flatten() {
             assert!(
                 captured.contains(needle.as_str()),

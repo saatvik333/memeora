@@ -1,0 +1,10 @@
+{
+  "host": "claude",
+  "event": "stop",
+  "payload": { "cwd": "/home/u/proj", "transcript_path": "/home/u/.claude/t.jsonl" },
+  "expect": {
+    "transcript_jsonl": "{\"message\":{\"role\":\"user\",\"content\":\"add a test and run it\"}}\n{\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"on it\"},{\"type\":\"tool_use\",\"name\":\"Edit\",\"input\":{\"file_path\":\"src/main.rs\"}},{\"type\":\"tool_use\",\"name\":\"Bash\",\"input\":{\"command\":\"cargo test --key sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ012345\"}}]}}",
+    "captured_contains": ["edited files src/main.rs", "ran command cargo test", "[REDACTED]", "user:", "add a test"],
+    "captured_excludes": ["sk-ABCDEF", "tool_use"]
+  }
+}

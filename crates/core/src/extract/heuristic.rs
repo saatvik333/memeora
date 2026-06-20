@@ -59,6 +59,11 @@ const EPISODE_MARKERS: &[&str] = &[
     "i talked",
     "i spoke",
     "i went",
+    // Session-activity cues — surface the work a coding session did. These match the
+    // derived lines memeora-hook's `session_capture` emits ("edited files …", "ran
+    // command …") so harness sessions yield durable episodes, not just user prose.
+    "edited file",
+    "ran command",
 ];
 
 /// Stable-statement / decision cues → [`MemoryKind::Fact`].
@@ -174,12 +179,30 @@ fn classify_save_kind(lower: &str) -> MemoryKind {
     }
 }
 
-/// Split text into trimmed, non-empty statements on sentence terminators and newlines.
+/// Split text into trimmed, non-empty statements on newlines and on sentence
+/// terminators **at a boundary** (terminator followed by whitespace or end-of-text),
+/// so dotted tokens — file paths (`sqlite.rs`), versions (`v1.2`), `e.g.` — aren't
+/// split mid-token.
 fn segment(text: &str) -> Vec<&str> {
-    text.split(['.', '!', '?', '\n', '\r'])
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .collect()
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut start = 0;
+    for (i, &b) in bytes.iter().enumerate() {
+        let terminates =
+            matches!(b, b'.' | b'!' | b'?') && bytes.get(i + 1).is_none_or(u8::is_ascii_whitespace);
+        if terminates || matches!(b, b'\n' | b'\r') {
+            let seg = text[start..i].trim();
+            if !seg.is_empty() {
+                out.push(seg);
+            }
+            start = i + 1;
+        }
+    }
+    let seg = text[start..].trim();
+    if !seg.is_empty() {
+        out.push(seg);
+    }
+    out
 }
 
 fn word_count(s: &str) -> usize {
@@ -269,5 +292,24 @@ mod tests {
         assert_eq!(m.content, c.content);
         assert_eq!(m.kind, MemoryKind::Preference);
         assert_eq!(m.container_tag, "tag");
+    }
+
+    #[test]
+    fn captures_session_activity_as_episodes() {
+        // The derived capture lines a coding session produces become memories.
+        let c = extract(
+            "edited files crates/core/src/store/sqlite.rs\nran command cargo test --workspace",
+        );
+        assert_eq!(c.len(), 2);
+        assert!(c.iter().all(|x| x.kind == MemoryKind::Episode));
+    }
+
+    #[test]
+    fn segment_keeps_dotted_tokens_intact() {
+        // A file path must stay one statement, not split at the extension dot.
+        let c = extract("ran command cargo build. edited files src/main.rs");
+        assert_eq!(c.len(), 2);
+        assert!(c.iter().any(|x| x.content.contains("src/main.rs")));
+        assert!(c.iter().any(|x| x.content.contains("cargo build")));
     }
 }

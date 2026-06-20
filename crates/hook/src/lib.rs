@@ -16,7 +16,7 @@ use serde_json::Value;
 pub use descriptor::{HostDescriptor, InjectStyle};
 // Redaction is owned by the engine (core); re-export so the hook's capture path
 // and the public API keep a single, canonical, whitespace-preserving implementation.
-pub use memeora_core::privacy::redact;
+pub use memeora_core::privacy::{redact, sanitize};
 pub use run::run;
 
 /// Resolve a dotted payload path: object keys, with numeric segments indexing
@@ -168,10 +168,148 @@ pub fn extract_text(value: &Value) -> String {
     }
 }
 
+/// Tools whose `file_path` input names a file the session created or edited.
+const FILE_EDIT_TOOLS: &[&str] = &[
+    "Edit",
+    "Write",
+    "MultiEdit",
+    "NotebookEdit",
+    "Update",
+    "Create",
+];
+/// Max files / commands surfaced in the activity summary, and per-command length.
+const MAX_ACTIVITY: usize = 20;
+const MAX_CMD_LEN: usize = 100;
+/// Overall cap on captured text so a long session can't flood the embedder/store.
+const MAX_CAPTURE_BYTES: usize = 8192;
+
+/// Build the capture text for a session: a compact, derived summary of the *work*
+/// (files edited, commands run) followed by the recent user/assistant turns.
+///
+/// Only **derived signals** are taken from tool calls — file paths from edit tools
+/// and the command string from `Bash` — never tool *result* bodies. Raw command
+/// output, fetched pages, and read file contents are attacker-influenceable, so
+/// storing them verbatim would let a hostile repo seed "memory"; deriving the
+/// structure of the work keeps what's captured to what the session actually did.
+pub fn session_capture(jsonl: &str, max_turns: usize) -> String {
+    let mut files: Vec<String> = Vec::new();
+    let mut commands: Vec<String> = Vec::new();
+    for line in jsonl.lines() {
+        if let Ok(value) = serde_json::from_str::<Value>(line) {
+            collect_activity(&value, &mut files, &mut commands);
+        }
+    }
+    dedup_in_place(&mut files);
+    dedup_in_place(&mut commands);
+
+    let mut sections: Vec<String> = Vec::new();
+    if !files.is_empty() {
+        let shown = files
+            .iter()
+            .take(MAX_ACTIVITY)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        sections.push(format!("edited files {shown}"));
+    }
+    for cmd in commands.iter().take(MAX_ACTIVITY) {
+        sections.push(format!("ran command {cmd}"));
+    }
+    let turns = transcript_to_text(jsonl, max_turns);
+    if !turns.is_empty() {
+        sections.push(turns);
+    }
+
+    let mut out = sections.join("\n");
+    if out.len() > MAX_CAPTURE_BYTES {
+        let mut end = MAX_CAPTURE_BYTES;
+        while !out.is_char_boundary(end) {
+            end -= 1;
+        }
+        out.truncate(end);
+    }
+    out
+}
+
+/// Pull derived activity (edited files, run commands) from one transcript entry's
+/// `tool_use` blocks. Unknown tools are ignored, so arbitrary tool payloads — which
+/// can carry secrets or attacker-injected text — are never surfaced.
+fn collect_activity(value: &Value, files: &mut Vec<String>, commands: &mut Vec<String>) {
+    let content = value
+        .get("message")
+        .and_then(|m| m.get("content"))
+        .or_else(|| value.get("content"));
+    let Some(Value::Array(blocks)) = content else {
+        return;
+    };
+    for block in blocks {
+        if block.get("type").and_then(Value::as_str) != Some("tool_use") {
+            continue;
+        }
+        let name = block
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let input = block.get("input");
+        if FILE_EDIT_TOOLS.contains(&name) {
+            if let Some(path) = input
+                .and_then(|i| i.get("file_path"))
+                .and_then(Value::as_str)
+            {
+                files.push(path.to_string());
+            }
+        } else if name == "Bash"
+            && let Some(cmd) = input.and_then(|i| i.get("command")).and_then(Value::as_str)
+        {
+            commands.push(truncate_chars(cmd, MAX_CMD_LEN));
+        }
+    }
+}
+
+/// Drop duplicate entries, keeping first-seen order.
+fn dedup_in_place(items: &mut Vec<String>) {
+    let mut seen = std::collections::HashSet::new();
+    items.retain(|item| seen.insert(item.clone()));
+}
+
+/// Truncate `s` to at most `max` bytes on a char boundary, marking elision.
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &s[..end])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use descriptor::builtin;
+
+    #[test]
+    fn session_capture_surfaces_files_and_commands() {
+        let jsonl = [
+            r#"{"message":{"role":"user","content":"do the thing"}}"#,
+            r#"{"message":{"role":"assistant","content":[{"type":"text","text":"ok"},{"type":"tool_use","name":"Edit","input":{"file_path":"src/a.rs"}},{"type":"tool_use","name":"Bash","input":{"command":"cargo build"}}]}}"#,
+        ]
+        .join("\n");
+        let out = session_capture(&jsonl, 40);
+        assert!(out.contains("edited files src/a.rs"), "{out}");
+        assert!(out.contains("ran command cargo build"), "{out}");
+        assert!(out.contains("user: do the thing"), "{out}");
+    }
+
+    #[test]
+    fn session_capture_ignores_unknown_tool_payloads() {
+        // A tool_use that isn't a known file/command tool must not surface its body.
+        let jsonl = r#"{"message":{"role":"assistant","content":[{"type":"tool_use","name":"WebFetch","input":{"url":"http://x"},"text":"secret-ish"}]}}"#;
+        let out = session_capture(jsonl, 40);
+        assert!(!out.contains("secret-ish"), "{out}");
+        assert!(!out.contains("WebFetch"), "{out}");
+    }
 
     fn claude() -> HostDescriptor {
         builtin("claude").unwrap()
