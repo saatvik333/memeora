@@ -312,4 +312,11 @@ mod tests {
         assert!(c.iter().any(|x| x.content.contains("src/main.rs")));
         assert!(c.iter().any(|x| x.content.contains("cargo build")));
     }
+
+    #[test]
+    fn segment_handles_crlf_line_endings() {
+        // Windows \r\n must split cleanly — no spurious empty or garbage segment.
+        let c = extract("ran command cargo test\r\nedited file src/main.rs");
+        assert_eq!(c.len(), 2);
+    }
 }

@@ -557,21 +557,26 @@ impl VectorStore for SqliteStore {
         container_tag: &str,
         entities: &[String],
     ) -> Result<()> {
+        // SAVEPOINT so the whole link set is atomic: it nests inside the daemon's batch
+        // transaction, and is self-contained if a caller links outside one (no partial
+        // entity writes on mid-list failure).
+        let tx = self.conn.savepoint()?;
         for canonical in entities {
             // Deterministic, container-scoped id so re-linking the same entity is a
             // no-op (INSERT OR IGNORE) rather than a duplicate.
             let entity_id =
                 crate::container_tag::sha32(&format!("{container_tag}\u{0}{canonical}"));
-            self.conn.execute(
+            tx.execute(
                 "INSERT OR IGNORE INTO entities (id, canonical, container_tag, created_at)
                  VALUES (?1, ?2, ?3, ?4)",
                 params![entity_id, canonical, container_tag, now_unix()],
             )?;
-            self.conn.execute(
+            tx.execute(
                 "INSERT OR IGNORE INTO memory_entities (memory_id, entity_id) VALUES (?1, ?2)",
                 params![memory_id, entity_id],
             )?;
         }
+        tx.commit()?;
         Ok(())
     }
 
@@ -606,34 +611,39 @@ impl VectorStore for SqliteStore {
         if seed_ids.is_empty() || k == 0 {
             return Ok(Vec::new());
         }
-        // Aggregate shared-entity counts across all seeds (reusing the per-seed query),
-        // excluding the seeds themselves, then hydrate the top-k neighbors.
-        let seeds: std::collections::HashSet<&str> = seed_ids.iter().map(String::as_str).collect();
-        let mut counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
-        for seed in seed_ids {
-            for (id, shared) in self.shared_entity_memory_ids(seed, k.saturating_mul(4))? {
-                if !seeds.contains(id.as_str()) {
-                    *counts.entry(id).or_default() += shared;
-                }
-            }
-        }
-        let mut ranked: Vec<(String, u32)> = counts.into_iter().collect();
-        ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-        ranked.truncate(k);
+        // One global aggregation across all seeds in a single query. A per-seed LIMIT
+        // would silently drop a neighbor that is weakly shared with many seeds but
+        // strong overall, corrupting the top-k. Seed ids are store-controlled and bound
+        // as parameters.
+        let placeholders = vec!["?"; seed_ids.len()].join(",");
+        let sql = format!(
+            "SELECT {MEMORY_COLS}, COUNT(*) AS shared
+             FROM memory_entities me1
+             JOIN memory_entities me2 ON me1.entity_id = me2.entity_id
+             JOIN memories m ON m.id = me2.memory_id
+             WHERE me1.memory_id IN ({placeholders})
+               AND me2.memory_id NOT IN ({placeholders})
+               AND m.container_tag = ? AND m.is_latest = 1
+             GROUP BY m.id
+             ORDER BY shared DESC, m.id
+             LIMIT ?"
+        );
+        let mut sql_params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(seed_ids.len() * 2 + 2);
+        sql_params.extend(seed_ids.iter().map(|s| s as &dyn rusqlite::ToSql));
+        sql_params.extend(seed_ids.iter().map(|s| s as &dyn rusqlite::ToSql));
+        sql_params.push(&container_tag);
+        let k = k as i64;
+        sql_params.push(&k);
 
-        let mut out = Vec::with_capacity(ranked.len());
-        for (id, shared) in ranked {
-            if let Some(memory) = self.get(&id)?
-                && memory.is_latest
-                && memory.container_tag == container_tag
-            {
-                out.push(ScoredMemory {
-                    memory,
-                    score: shared as f32,
-                });
-            }
-        }
-        Ok(out)
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(sql_params.as_slice(), |row| {
+            Ok(ScoredMemory {
+                memory: row_to_memory(row)?,
+                score: row.get::<_, i64>("shared")? as f32,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 }
 
@@ -1098,5 +1108,27 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn graph_search_aggregates_shared_count_across_seeds() {
+        // A neighbor weakly linked to several seeds must accumulate its global score
+        // (the bug a per-seed LIMIT would hide).
+        let mut s = SqliteStore::open_in_memory(2).unwrap();
+        let tag = "t";
+        for id in ["s1", "s2", "n", "other"] {
+            s.upsert(&mem(id, "x", tag, vec![1.0, 0.0])).unwrap();
+        }
+        s.link_entities("s1", tag, &["e1".into()]).unwrap();
+        s.link_entities("s2", tag, &["e2".into()]).unwrap();
+        s.link_entities("n", tag, &["e1".into(), "e2".into()])
+            .unwrap(); // shares 1 with each seed
+
+        let g = s
+            .graph_search(tag, &["s1".to_string(), "s2".to_string()], 10)
+            .unwrap();
+        assert_eq!(g.len(), 1);
+        assert_eq!(g[0].memory.id, "n");
+        assert_eq!(g[0].score, 2.0, "shared count aggregates across both seeds");
     }
 }

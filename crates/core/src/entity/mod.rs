@@ -134,7 +134,9 @@ fn is_path(token: &str) -> bool {
 fn is_code_ident(token: &str) -> bool {
     let snake = token.contains('_')
         && token.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-        && token.chars().any(|c| c.is_ascii_alphabetic());
+        && token.chars().any(|c| c.is_ascii_alphabetic())
+        // Every `_`-delimited segment ≥2 chars: rejects noise like `a_b`, `_x`, `x__`.
+        && token.split('_').all(|seg| seg.len() >= 2);
     let camel = token.chars().all(|c| c.is_ascii_alphanumeric())
         && token.chars().filter(|c| c.is_ascii_uppercase()).count() >= 2
         && token.starts_with(|c: char| c.is_ascii_uppercase());
@@ -175,5 +177,14 @@ mod tests {
     #[test]
     fn dedups_and_lowercases() {
         assert_eq!(extract_entities("Rust Rust rust"), vec!["rust"]);
+    }
+
+    #[test]
+    fn skips_short_segment_snake_noise() {
+        // `a_b` / `x_` are noise, not identifiers worth tracking; real idents survive.
+        assert_eq!(
+            extract_entities("touched a_b and x_ and proof_count"),
+            vec!["proof_count"]
+        );
     }
 }

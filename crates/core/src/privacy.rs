@@ -191,11 +191,13 @@ fn is_auth_scheme(word: &str) -> bool {
 /// rather than a prose word — used only after an auth-scheme cue, to bound false
 /// positives on ordinary following words.
 fn looks_token(core: &str) -> bool {
+    // No digit requirement: after an explicit auth-scheme cue, a 12+ char token-charset
+    // word is a credential even if it's all letters (e.g. a JWT segment). The auth-scheme
+    // context is the guard against false positives, not the digit.
     core.len() >= 12
         && core
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || "-_+/=.".contains(c))
-        && core.chars().any(|c| c.is_ascii_digit())
 }
 
 #[cfg(test)]
@@ -289,6 +291,12 @@ mod tests {
             "bearer token not masked: {out:?}"
         );
         assert!(!out.contains("abc123def456"));
+        // An all-alpha token (e.g. a JWT segment) after the scheme is still masked.
+        let alpha = redact("Authorization: Bearer aAbBcCdDeEfFgGhHiIjJ");
+        assert!(
+            alpha.contains("[REDACTED]") && !alpha.contains("aAbBcCdD"),
+            "{alpha:?}"
+        );
         // The word after "bearer" in ordinary prose must NOT be redacted.
         assert_eq!(redact("the bearer of bad news"), "the bearer of bad news");
     }

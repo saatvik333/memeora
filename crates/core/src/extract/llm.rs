@@ -79,6 +79,10 @@ impl LlmConfig {
 
 /// Whether `url`'s host is loopback (so it's allowed under local-first).
 fn host_is_local(url: &str) -> bool {
+    // Strip the URL fragment FIRST: `#` ends the authority, so `evil.com#@localhost`
+    // has host `evil.com`, not `localhost`. Without this, a crafted endpoint slips a
+    // fake `@localhost` into the fragment and bypasses the egress-consent gate.
+    let url = url.split('#').next().unwrap_or(url);
     let after_scheme = url.split("://").nth(1).unwrap_or(url);
     let authority = after_scheme.split('/').next().unwrap_or("");
     // Drop any userinfo, then take the host (before the port); handle [::1]:port.
@@ -88,7 +92,9 @@ fn host_is_local(url: &str) -> bool {
     } else {
         hostport.split(':').next().unwrap_or(hostport)
     };
-    matches!(host, "localhost" | "127.0.0.1" | "::1") || host.ends_with(".localhost")
+    // Hostnames are case-insensitive, so `LOCALHOST` is loopback too.
+    let host = host.to_ascii_lowercase();
+    matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1") || host.ends_with(".localhost")
 }
 
 /// Sends a JSON POST to `url` and returns the response body. Abstracted so the
@@ -150,9 +156,25 @@ fn split_url(url: &str) -> Result<(String, u16, String)> {
         Some(i) => (&rest[..i], &rest[i..]),
         None => (rest, "/"),
     };
-    let (host, port) = match authority.rsplit_once(':') {
-        Some((h, p)) => (h.to_string(), p.parse().unwrap_or(80)),
-        None => (authority.to_string(), 80),
+    let parse_port = |p: &str| {
+        p.parse::<u16>()
+            .map_err(|_| Error::Llm(format!("invalid port {p:?} in URL {url:?}")))
+    };
+    let (host, port) = if let Some(rest) = authority.strip_prefix('[') {
+        // IPv6: `[host]` or `[host]:port`. Strip the brackets so the bare address
+        // reaches TcpStream::connect (which rejects the bracketed form), and don't let
+        // the colons inside the address confuse the port split.
+        let (host, after) = rest.split_once(']').unwrap_or((rest, ""));
+        let port = match after.strip_prefix(':') {
+            Some(p) => parse_port(p)?,
+            None => 80,
+        };
+        (host.to_string(), port)
+    } else {
+        match authority.rsplit_once(':') {
+            Some((h, p)) => (h.to_string(), parse_port(p)?),
+            None => (authority.to_string(), 80),
+        }
     };
     Ok((host, port, path.to_string()))
 }
@@ -319,6 +341,12 @@ mod tests {
         assert!(cfg("http://[::1]:8080/v1", false).is_allowed());
         assert!(!cfg("http://api.openai.com/v1", false).is_allowed());
         assert!(cfg("http://api.openai.com/v1", true).is_allowed());
+        // A fragment-spoofed host must NOT be classified local (the consent-gate
+        // bypass `http://evil.com#@localhost` reported in review).
+        assert!(!cfg("http://evil.com:80#@localhost/v1", false).is_allowed());
+        assert!(!cfg("http://evil.com#@localhost/", false).is_allowed());
+        // Host comparison is case-insensitive: LOCALHOST is still loopback.
+        assert!(cfg("http://LOCALHOST:11434/v1", false).is_allowed());
     }
 
     #[test]
@@ -386,5 +414,16 @@ mod tests {
             ("127.0.0.1".to_string(), 80, "/x".to_string())
         );
         assert!(split_url("https://x/y").is_err(), "TLS is out of scope");
+        // IPv6 brackets are stripped so the bare address reaches TcpStream::connect.
+        assert_eq!(
+            split_url("http://[::1]:8080/v1").unwrap(),
+            ("::1".to_string(), 8080, "/v1".to_string())
+        );
+        assert_eq!(
+            split_url("http://[::1]/v1").unwrap(),
+            ("::1".to_string(), 80, "/v1".to_string())
+        );
+        // A malformed port is a hard error, not a silent fallback to 80.
+        assert!(split_url("http://localhost:notaport/v1").is_err());
     }
 }

@@ -277,7 +277,8 @@ fn truncate_chars(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_string();
     }
-    let mut end = max;
+    // Reserve room for the 3-byte ellipsis so the result stays within `max` bytes.
+    let mut end = max.saturating_sub("…".len());
     while !s.is_char_boundary(end) {
         end -= 1;
     }
