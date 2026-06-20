@@ -10,6 +10,7 @@
 pub mod container_tag;
 pub mod db;
 pub mod embed;
+pub mod entity;
 mod error;
 pub mod extract;
 pub mod ingest;
@@ -20,6 +21,7 @@ pub mod search;
 pub mod store;
 
 pub use embed::{CachingEmbedder, EmbeddingProvider, EmbeddingSpace};
+pub use entity::extract_entities;
 pub use error::{Error, Result};
 pub use extract::{Candidate, Extractor, HeuristicExtractor};
 pub use ingest::{

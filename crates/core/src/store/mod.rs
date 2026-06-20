@@ -243,4 +243,27 @@ pub trait VectorStore {
     /// Soft-forget a memory: mark it not-latest so retrieval skips it. The row is
     /// never hard-deleted (it stays fetchable by [`get`](VectorStore::get)).
     fn forget(&mut self, id: &str) -> Result<()>;
+
+    /// Link `memory_id` to its canonical `entities` within `container_tag`, creating
+    /// the entities as needed. Idempotent. Default: no-op, for stores without an
+    /// entity index.
+    fn link_entities(
+        &mut self,
+        _memory_id: &str,
+        _container_tag: &str,
+        _entities: &[String],
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    /// Latest memories in the same scope sharing ≥1 canonical entity with
+    /// `memory_id`, each with its shared-entity count, most-shared first. Feeds the
+    /// graph recall channel. Default: empty.
+    fn shared_entity_memory_ids(
+        &self,
+        _memory_id: &str,
+        _limit: usize,
+    ) -> Result<Vec<(String, u32)>> {
+        Ok(Vec::new())
+    }
 }

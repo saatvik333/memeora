@@ -52,6 +52,24 @@ fn migrations() -> Migrations<'static> {
              ALTER TABLE memories ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0;
              CREATE INDEX idx_memories_root ON memories(root_id);",
         ),
+        // Entity layer (increment C): canonical entities + memory↔entity links,
+        // scoped per container. Powers entity-keyed consolidation (D) and the graph
+        // recall channel (F). Entity `id` is sha32(container_tag\0canonical), so
+        // INSERT OR IGNORE makes (re)linking idempotent.
+        M::up(
+            "CREATE TABLE entities (
+            id            TEXT NOT NULL PRIMARY KEY,
+            canonical     TEXT NOT NULL,
+            container_tag TEXT NOT NULL,
+            created_at    INTEGER NOT NULL
+        );
+        CREATE TABLE memory_entities (
+            memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+            entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+            PRIMARY KEY (memory_id, entity_id)
+        );
+        CREATE INDEX idx_memory_entities_entity ON memory_entities(entity_id);",
+        ),
     ])
 }
 

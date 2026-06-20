@@ -143,6 +143,9 @@ pub fn ingest_prepared(
 
     for (candidate, embedding) in prepared {
         let id = content_id(container_tag, &candidate.content);
+        // Canonical entities for this content — linked on every insert/resurrect so
+        // memories about the same thing can be related (graph channel / consolidation).
+        let entities = crate::entity::extract_entities(&candidate.content);
 
         // Exact re-ingest by content id, handled before the KNN heuristic (which can
         // miss the literal-same row).
@@ -161,6 +164,7 @@ pub fn ingest_prepared(
                 // *different* neighbor instead of bringing this content back.
                 let memory = candidate.into_memory(id.clone(), container_tag, embedding);
                 store.upsert(&memory)?;
+                store.link_entities(&id, container_tag, &entities)?;
                 outcome.added.push(id);
             }
             continue;
@@ -202,6 +206,7 @@ pub fn ingest_prepared(
 
         let memory = candidate.into_memory(id.clone(), container_tag, embedding);
         store.upsert(&memory)?;
+        store.link_entities(&id, container_tag, &entities)?;
         // Link the new memory to its moderately-similar neighbors.
         for target in &link_targets {
             store.add_edge(&id, target, EdgeKind::Extends)?;
@@ -548,6 +553,45 @@ mod tests {
             store.count(tag).unwrap(),
             0,
             "partial batch must roll back — no memory left committed"
+        );
+    }
+
+    #[test]
+    fn ingest_links_shared_entities() {
+        // Two memories mentioning the same code identifier become entity-linked.
+        let extractor = HeuristicExtractor::default();
+        let embedder = MapEmbedder::new(&[
+            ("I prefer SqliteStore", vec![1.0, 0.0, 0.0]),
+            ("We use SqliteStore", vec![0.0, 1.0, 0.0]),
+        ]);
+        let mut store = SqliteStore::open_in_memory(3).unwrap();
+        let p = IngestParams::default();
+
+        let a = ingest(
+            &mut store,
+            &embedder,
+            &extractor,
+            "t",
+            "I prefer SqliteStore",
+            &p,
+        )
+        .unwrap();
+        let b = ingest(
+            &mut store,
+            &embedder,
+            &extractor,
+            "t",
+            "We use SqliteStore",
+            &p,
+        )
+        .unwrap();
+
+        assert_eq!(a.added.len(), 1);
+        assert_eq!(b.added.len(), 1);
+        assert_eq!(
+            store.shared_entity_memory_ids(&a.added[0], 10).unwrap(),
+            vec![(b.added[0].clone(), 1)],
+            "memories sharing the SqliteStore entity must resolve as related"
         );
     }
 }

@@ -512,6 +512,52 @@ impl VectorStore for SqliteStore {
         tx.commit()?;
         Ok(())
     }
+
+    fn link_entities(
+        &mut self,
+        memory_id: &str,
+        container_tag: &str,
+        entities: &[String],
+    ) -> Result<()> {
+        for canonical in entities {
+            // Deterministic, container-scoped id so re-linking the same entity is a
+            // no-op (INSERT OR IGNORE) rather than a duplicate.
+            let entity_id =
+                crate::container_tag::sha32(&format!("{container_tag}\u{0}{canonical}"));
+            self.conn.execute(
+                "INSERT OR IGNORE INTO entities (id, canonical, container_tag, created_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![entity_id, canonical, container_tag, now_unix()],
+            )?;
+            self.conn.execute(
+                "INSERT OR IGNORE INTO memory_entities (memory_id, entity_id) VALUES (?1, ?2)",
+                params![memory_id, entity_id],
+            )?;
+        }
+        Ok(())
+    }
+
+    fn shared_entity_memory_ids(
+        &self,
+        memory_id: &str,
+        limit: usize,
+    ) -> Result<Vec<(String, u32)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT me2.memory_id, COUNT(*) AS shared
+             FROM memory_entities me1
+             JOIN memory_entities me2 ON me1.entity_id = me2.entity_id
+             JOIN memories m ON m.id = me2.memory_id
+             WHERE me1.memory_id = ?1 AND me2.memory_id != ?1 AND m.is_latest = 1
+             GROUP BY me2.memory_id
+             ORDER BY shared DESC, me2.memory_id
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![memory_id, limit as i64], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u32))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
 }
 
 #[cfg(test)]
@@ -867,5 +913,38 @@ mod tests {
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
         }
+    }
+
+    #[test]
+    fn entities_link_and_resolve_shared() {
+        let mut s = SqliteStore::open_in_memory(2).unwrap();
+        let tag = "t";
+        s.upsert(&mem("a", "about SqliteStore", tag, vec![1.0, 0.0]))
+            .unwrap();
+        s.upsert(&mem("b", "more SqliteStore design", tag, vec![0.0, 1.0]))
+            .unwrap();
+        s.upsert(&mem("c", "unrelated", tag, vec![1.0, 1.0]))
+            .unwrap();
+        s.link_entities("a", tag, &["sqlitestore".into(), "proof_count".into()])
+            .unwrap();
+        s.link_entities("b", tag, &["sqlitestore".into()]).unwrap();
+
+        // "a" and "b" share one entity; "c" shares none.
+        assert_eq!(
+            s.shared_entity_memory_ids("a", 10).unwrap(),
+            vec![("b".to_string(), 1)]
+        );
+        assert!(s.shared_entity_memory_ids("c", 10).unwrap().is_empty());
+
+        // Linking is idempotent — no duplicate rows, same shared result.
+        s.link_entities("b", tag, &["sqlitestore".into()]).unwrap();
+        assert_eq!(
+            s.shared_entity_memory_ids("a", 10).unwrap(),
+            vec![("b".to_string(), 1)]
+        );
+
+        // A forgotten memory drops out of the shared results (is_latest filter).
+        s.forget("b").unwrap();
+        assert!(s.shared_entity_memory_ids("a", 10).unwrap().is_empty());
     }
 }
