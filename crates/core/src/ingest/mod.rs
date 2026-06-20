@@ -199,7 +199,9 @@ pub fn ingest_prepared(
         };
 
         if let Some(dup) = duplicate_id {
-            store.reinforce(&dup, params.reinforce_delta)?;
+            // A distinct near-duplicate is independent corroboration, not mere
+            // repetition: bump proof_count alongside strength (consolidation).
+            store.corroborate(&dup, params.reinforce_delta)?;
             outcome.reinforced.push(dup);
             continue;
         }
@@ -592,6 +594,69 @@ mod tests {
             store.shared_entity_memory_ids(&a.added[0], 10).unwrap(),
             vec![(b.added[0].clone(), 1)],
             "memories sharing the SqliteStore entity must resolve as related"
+        );
+    }
+
+    #[test]
+    fn near_duplicate_corroborates_proof_count() {
+        // A distinct statement of the same belief (same kind, near in embedding)
+        // reinforces AND corroborates — proof_count grows.
+        let extractor = HeuristicExtractor::default();
+        let embedder = MapEmbedder::new(&[
+            ("I prefer dark mode", vec![1.0, 0.0, 0.0]),
+            ("I like dark mode", vec![1.0, 0.0, 0.0]),
+        ]);
+        let mut store = SqliteStore::open_in_memory(3).unwrap();
+        let p = IngestParams::default();
+
+        let a = ingest(
+            &mut store,
+            &embedder,
+            &extractor,
+            "t",
+            "I prefer dark mode",
+            &p,
+        )
+        .unwrap();
+        assert_eq!(store.get(&a.added[0]).unwrap().unwrap().proof_count, 1);
+
+        let b = ingest(
+            &mut store,
+            &embedder,
+            &extractor,
+            "t",
+            "I like dark mode",
+            &p,
+        )
+        .unwrap();
+        assert_eq!(
+            b.added.len(),
+            0,
+            "near-dup of same kind reinforces, not inserts"
+        );
+        assert_eq!(b.reinforced.len(), 1);
+        assert_eq!(
+            store.get(&a.added[0]).unwrap().unwrap().proof_count,
+            2,
+            "corroborated by a distinct statement"
+        );
+    }
+
+    #[test]
+    fn exact_reingest_does_not_inflate_proof_count() {
+        // The SAME statement restated is repetition by one source, not new evidence.
+        let extractor = HeuristicExtractor::default();
+        let embedder = MapEmbedder::new(&[("I prefer dark mode", vec![1.0, 0.0, 0.0])]);
+        let mut store = SqliteStore::open_in_memory(3).unwrap();
+        let p = IngestParams::default();
+        let text = "I prefer dark mode";
+
+        let a = ingest(&mut store, &embedder, &extractor, "t", text, &p).unwrap();
+        ingest(&mut store, &embedder, &extractor, "t", text, &p).unwrap();
+        assert_eq!(
+            store.get(&a.added[0]).unwrap().unwrap().proof_count,
+            1,
+            "exact re-ingest must not inflate proof_count"
         );
     }
 }

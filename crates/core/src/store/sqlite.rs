@@ -455,6 +455,15 @@ impl VectorStore for SqliteStore {
         Ok(())
     }
 
+    fn corroborate(&mut self, id: &str, delta: f32) -> Result<()> {
+        self.conn.execute(
+            "UPDATE memories SET strength = strength + ?1, proof_count = proof_count + 1, \
+             last_accessed_at = ?2, access_count = access_count + 1 WHERE id = ?3",
+            params![delta as f64, now_unix(), id],
+        )?;
+        Ok(())
+    }
+
     fn add_edge(&mut self, from_id: &str, to_id: &str, kind: EdgeKind) -> Result<()> {
         self.conn.execute(
             "INSERT OR IGNORE INTO relationships (from_id, to_id, kind, created_at)
@@ -946,5 +955,22 @@ mod tests {
         // A forgotten memory drops out of the shared results (is_latest filter).
         s.forget("b").unwrap();
         assert!(s.shared_entity_memory_ids("a", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn corroborate_bumps_proof_count_and_strength() {
+        let mut s = SqliteStore::open_in_memory(2).unwrap();
+        s.upsert(&mem("m1", "x", "t", vec![1.0, 0.0])).unwrap();
+        let before = s.get("m1").unwrap().unwrap();
+        assert_eq!((before.proof_count, before.access_count), (1, 0));
+
+        s.corroborate("m1", 0.5).unwrap();
+        let after = s.get("m1").unwrap().unwrap();
+        assert_eq!(
+            after.proof_count, 2,
+            "distinct corroboration grows proof_count"
+        );
+        assert_eq!(after.access_count, 1);
+        assert!(after.strength > before.strength);
     }
 }

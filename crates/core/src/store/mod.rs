@@ -233,6 +233,14 @@ pub trait VectorStore {
     /// to now. A no-op if `id` is unknown.
     fn reinforce(&mut self, id: &str, delta: f32) -> Result<()>;
 
+    /// Corroborate a memory with a *distinct* equivalent statement: like
+    /// [`reinforce`](VectorStore::reinforce) (strength + access) but also bumps
+    /// `proof_count` (independent corroborating evidence — the consolidation signal).
+    /// Default delegates to `reinforce` for stores without a `proof_count` column.
+    fn corroborate(&mut self, id: &str, delta: f32) -> Result<()> {
+        self.reinforce(id, delta)
+    }
+
     /// Add a directed `from_id --kind--> to_id` edge. Idempotent (duplicate edges
     /// of the same kind are ignored).
     fn add_edge(&mut self, from_id: &str, to_id: &str, kind: EdgeKind) -> Result<()>;
