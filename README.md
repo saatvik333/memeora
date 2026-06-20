@@ -7,7 +7,10 @@ memeora gives your AI coding tools **persistent memory** — it learns facts fro
 builds a knowledge graph, and recalls the right context at the right time. It's a free,
 **local-first**, open alternative to hosted memory APIs: **no required LLM, no API key, works offline.**
 
-> **Status:** Steps 1–10 implemented (v0.1.0) — the engine, its surfaces, per-tool
+> **Status:** Steps 1–10 implemented (v0.1.0), plus the **step-11 engine-evolution core**
+> — session-aware capture, entity canonicalization, consolidation (`proof_count`), the
+> Ebbinghaus/Hebbian/Cepeda forgetting engine, the recall graph channel, and the opt-in
+> local-LLM extractor (off by default). The engine, its surfaces, per-tool
 > packaging, the local dashboard, the extensibility/ecosystem layer, and the
 > cross-platform **release pipeline** are end-to-end:
 > - **Engine (`crates/core`):** SQLite + statically-linked `sqlite-vec` KNN + FTS5 behind the
