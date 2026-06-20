@@ -110,15 +110,59 @@ pub fn search(
         .saturating_mul(params.candidate_multiplier)
         .max(params.k);
 
-    let mut lists: Vec<Vec<ScoredMemory>> = Vec::with_capacity(2);
+    let mut lists: Vec<Vec<ScoredMemory>> = Vec::with_capacity(3);
     if params.mode != SearchMode::Text {
         lists.push(store.knn(container_tag, query_embedding, pool)?);
     }
     if params.mode != SearchMode::Vector {
         lists.push(store.text_search(container_tag, query_text, pool)?);
     }
+    // Graph channel (Hybrid only): entity-neighbors of the dense/lexical hits,
+    // surfacing related memories that neither signal matched directly.
+    if params.mode == SearchMode::Hybrid {
+        let seeds: Vec<String> = lists
+            .iter()
+            .flatten()
+            .map(|s| s.memory.id.clone())
+            .collect();
+        let graph = store.graph_search(container_tag, &seeds, pool)?;
+        if !graph.is_empty() {
+            lists.push(graph);
+        }
+    }
 
-    Ok(rrf_fuse(&lists, params.rrf_k, params.k, now))
+    // Fuse to an interim pool, apply bounded multiplicative boosts (recency from
+    // stability-aware decay; corroboration from proof_count), then take the top k.
+    let mut fused = rrf_fuse(&lists, params.rrf_k, pool, now);
+    for scored in &mut fused {
+        scored.score *= recency_boost(&scored.memory, now) * proof_boost(&scored.memory);
+    }
+    fused.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| a.memory.id.cmp(&b.memory.id))
+    });
+    fused.truncate(params.k);
+    Ok(fused)
+}
+
+/// Recency boost in `[1-α, 1+α]` from stability-aware Ebbinghaus decay: a freshly
+/// accessed (or high-stability) memory is boosted, a long-idle one discounted.
+/// Neutral at a decay ratio of 0.5; a neutral signal can't overpower relevance.
+fn recency_boost(m: &Memory, now: i64) -> f32 {
+    const ALPHA: f32 = 0.2;
+    let ratio = (crate::dynamics::decayed_strength(m, now)
+        / m.strength.max(crate::dynamics::STRENGTH_FLOOR))
+    .clamp(0.0, 1.0);
+    1.0 + ALPHA * (2.0 * ratio - 1.0)
+}
+
+/// Corroboration boost in `[1, 1+α]` from proof_count: an independently corroborated
+/// belief ranks slightly higher. Neutral (1.0) at proof_count = 1.
+fn proof_boost(m: &Memory) -> f32 {
+    const ALPHA: f32 = 0.05;
+    1.0 + ALPHA * (1.0 - 1.0 / m.proof_count.max(1) as f32)
 }
 
 /// A reranked document: its position in the input slice and its relevance score.
@@ -279,5 +323,29 @@ mod tests {
         let hits = search(&store, tag, &[1.0, 0.0], "nonexistentterm", &params).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].memory.id, "m1");
+    }
+
+    #[test]
+    fn proof_boost_rewards_corroboration() {
+        let mut m = Memory::new("i", "c", MemoryKind::Fact, "t", Vec::new());
+        m.proof_count = 1;
+        assert!((proof_boost(&m) - 1.0).abs() < 1e-6, "neutral at one proof");
+        m.proof_count = 8;
+        assert!(proof_boost(&m) > 1.0, "corroboration boosts");
+    }
+
+    #[test]
+    fn recency_boost_discounts_stale() {
+        let now = 1_000_000_000;
+        let mut fresh = Memory::new("a", "c", MemoryKind::Fact, "t", Vec::new());
+        fresh.strength = 2.0;
+        fresh.stability = 1.0;
+        fresh.last_accessed_at = now;
+        let mut stale = fresh.clone();
+        stale.last_accessed_at = now - 86_400 * 30;
+        assert!(
+            recency_boost(&fresh, now) > recency_boost(&stale, now),
+            "a long-idle memory is discounted relative to a fresh one"
+        );
     }
 }

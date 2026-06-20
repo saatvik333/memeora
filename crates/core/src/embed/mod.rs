@@ -75,6 +75,13 @@ pub trait EmbeddingProvider: Send + Sync {
             crate::Error::Embedding("provider returned no embedding for query".into())
         })
     }
+
+    /// Whether this provider runs entirely on the local machine (no network egress).
+    /// Local providers are allowed under local-first; a remote/API provider overrides
+    /// this to `false` so the consent policy can gate it. Defaults to local.
+    fn is_local(&self) -> bool {
+        true
+    }
 }
 
 impl EmbeddingProvider for Box<dyn EmbeddingProvider> {
@@ -88,6 +95,12 @@ impl EmbeddingProvider for Box<dyn EmbeddingProvider> {
 
     fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
         (**self).embed_query(text)
+    }
+
+    // Must forward: the default `is_local` returns `true`, so without this a wrapped
+    // remote provider would be misreported as local and bypass the consent policy.
+    fn is_local(&self) -> bool {
+        (**self).is_local()
     }
 }
 

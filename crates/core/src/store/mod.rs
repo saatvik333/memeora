@@ -274,4 +274,17 @@ pub trait VectorStore {
     ) -> Result<Vec<(String, u32)>> {
         Ok(Vec::new())
     }
+
+    /// Graph recall channel: latest memories in `container_tag` that share canonical
+    /// entities with any of `seed_ids` (the seeds themselves excluded), ranked by
+    /// total shared-entity count (the returned score), best first, capped at `k`.
+    /// Default: empty, for stores without an entity index.
+    fn graph_search(
+        &self,
+        _container_tag: &str,
+        _seed_ids: &[String],
+        _k: usize,
+    ) -> Result<Vec<ScoredMemory>> {
+        Ok(Vec::new())
+    }
 }

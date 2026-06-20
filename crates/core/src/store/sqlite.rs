@@ -596,6 +596,45 @@ impl VectorStore for SqliteStore {
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
     }
+
+    fn graph_search(
+        &self,
+        container_tag: &str,
+        seed_ids: &[String],
+        k: usize,
+    ) -> Result<Vec<ScoredMemory>> {
+        if seed_ids.is_empty() || k == 0 {
+            return Ok(Vec::new());
+        }
+        // Aggregate shared-entity counts across all seeds (reusing the per-seed query),
+        // excluding the seeds themselves, then hydrate the top-k neighbors.
+        let seeds: std::collections::HashSet<&str> = seed_ids.iter().map(String::as_str).collect();
+        let mut counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+        for seed in seed_ids {
+            for (id, shared) in self.shared_entity_memory_ids(seed, k.saturating_mul(4))? {
+                if !seeds.contains(id.as_str()) {
+                    *counts.entry(id).or_default() += shared;
+                }
+            }
+        }
+        let mut ranked: Vec<(String, u32)> = counts.into_iter().collect();
+        ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        ranked.truncate(k);
+
+        let mut out = Vec::with_capacity(ranked.len());
+        for (id, shared) in ranked {
+            if let Some(memory) = self.get(&id)?
+                && memory.is_latest
+                && memory.container_tag == container_tag
+            {
+                out.push(ScoredMemory {
+                    memory,
+                    score: shared as f32,
+                });
+            }
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
@@ -1034,6 +1073,30 @@ mod tests {
             s.get("m1").unwrap().unwrap().stability,
             spaced,
             "a rapid burst must not build stability"
+        );
+    }
+
+    #[test]
+    fn graph_search_finds_entity_neighbors() {
+        let mut s = SqliteStore::open_in_memory(2).unwrap();
+        let tag = "t";
+        s.upsert(&mem("a", "x", tag, vec![1.0, 0.0])).unwrap();
+        s.upsert(&mem("b", "x", tag, vec![0.0, 1.0])).unwrap();
+        s.upsert(&mem("c", "x", tag, vec![1.0, 1.0])).unwrap();
+        s.link_entities("a", tag, &["sqlitestore".into()]).unwrap();
+        s.link_entities("b", tag, &["sqlitestore".into()]).unwrap();
+
+        // Seed "a": "b" shares the entity (and isn't a seed); "c" shares nothing.
+        let g = s.graph_search(tag, &["a".to_string()], 10).unwrap();
+        assert_eq!(g.len(), 1);
+        assert_eq!(g[0].memory.id, "b");
+        assert!(g[0].score >= 1.0);
+
+        // Seeds are excluded from their own neighbor results.
+        assert!(
+            s.graph_search(tag, &["a".to_string(), "b".to_string()], 10)
+                .unwrap()
+                .is_empty()
         );
     }
 }
