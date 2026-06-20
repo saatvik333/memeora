@@ -9,6 +9,7 @@
 
 pub mod container_tag;
 pub mod db;
+pub mod dynamics;
 pub mod embed;
 pub mod entity;
 mod error;
@@ -20,6 +21,7 @@ pub mod profile;
 pub mod search;
 pub mod store;
 
+pub use dynamics::decayed_strength;
 pub use embed::{CachingEmbedder, EmbeddingProvider, EmbeddingSpace};
 pub use entity::extract_entities;
 pub use error::{Error, Result};

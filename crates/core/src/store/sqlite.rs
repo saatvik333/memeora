@@ -5,6 +5,7 @@ use std::path::Path;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::db;
+use crate::dynamics;
 use crate::error::{Error, Result};
 use crate::store::{
     EdgeKind, GraphData, Memory, MemoryKind, Relationship, ScopeInfo, ScoredMemory, VectorStore,
@@ -447,19 +448,47 @@ impl VectorStore for SqliteStore {
     }
 
     fn reinforce(&mut self, id: &str, delta: f32) -> Result<()> {
+        // Hebbian potentiation capped at STRENGTH_MAX + Cepeda spacing: stability grows
+        // only when this access is ≥ SPACING_SECS after the last (the CASE reads the
+        // pre-update last_accessed_at). Decay itself is applied lazily at read time.
         self.conn.execute(
-            "UPDATE memories SET strength = strength + ?1, last_accessed_at = ?2, \
-             access_count = access_count + 1 WHERE id = ?3",
-            params![delta as f64, now_unix(), id],
+            "UPDATE memories SET
+                strength = MIN(?1, strength + ?2),
+                stability = stability + CASE WHEN (?3 - last_accessed_at) >= ?4 THEN ?5 ELSE 0 END,
+                last_accessed_at = ?3,
+                access_count = access_count + 1
+             WHERE id = ?6",
+            params![
+                dynamics::STRENGTH_MAX as f64,
+                delta as f64,
+                now_unix(),
+                dynamics::SPACING_SECS,
+                dynamics::STABILITY_DELTA as f64,
+                id,
+            ],
         )?;
         Ok(())
     }
 
     fn corroborate(&mut self, id: &str, delta: f32) -> Result<()> {
+        // Like reinforce (capped potentiation + spaced stability) plus proof_count for
+        // the distinct corroborating statement.
         self.conn.execute(
-            "UPDATE memories SET strength = strength + ?1, proof_count = proof_count + 1, \
-             last_accessed_at = ?2, access_count = access_count + 1 WHERE id = ?3",
-            params![delta as f64, now_unix(), id],
+            "UPDATE memories SET
+                strength = MIN(?1, strength + ?2),
+                proof_count = proof_count + 1,
+                stability = stability + CASE WHEN (?3 - last_accessed_at) >= ?4 THEN ?5 ELSE 0 END,
+                last_accessed_at = ?3,
+                access_count = access_count + 1
+             WHERE id = ?6",
+            params![
+                dynamics::STRENGTH_MAX as f64,
+                delta as f64,
+                now_unix(),
+                dynamics::SPACING_SECS,
+                dynamics::STABILITY_DELTA as f64,
+                id,
+            ],
         )?;
         Ok(())
     }
@@ -972,5 +1001,39 @@ mod tests {
         );
         assert_eq!(after.access_count, 1);
         assert!(after.strength > before.strength);
+    }
+
+    #[test]
+    fn reinforce_caps_strength() {
+        let mut s = SqliteStore::open_in_memory(2).unwrap();
+        s.upsert(&mem("m1", "x", "t", vec![1.0, 0.0])).unwrap();
+        for _ in 0..100 {
+            s.reinforce("m1", 1.0).unwrap();
+        }
+        assert!(
+            s.get("m1").unwrap().unwrap().strength <= dynamics::STRENGTH_MAX,
+            "Hebbian cap must bound runaway strength"
+        );
+    }
+
+    #[test]
+    fn reinforce_builds_stability_only_when_spaced() {
+        let mut s = SqliteStore::open_in_memory(2).unwrap();
+        let now = now_unix();
+        let mut m = mem("m1", "x", "t", vec![1.0, 0.0]);
+        m.last_accessed_at = now - dynamics::SPACING_SECS - 10; // last access > spacing ago
+        s.upsert(&m).unwrap();
+        let before = s.get("m1").unwrap().unwrap().stability;
+
+        s.reinforce("m1", 0.5).unwrap(); // spaced → stability grows
+        let spaced = s.get("m1").unwrap().unwrap().stability;
+        assert!(spaced > before, "spaced reinforcement builds durability");
+
+        s.reinforce("m1", 0.5).unwrap(); // immediate burst → no growth
+        assert_eq!(
+            s.get("m1").unwrap().unwrap().stability,
+            spaced,
+            "a rapid burst must not build stability"
+        );
     }
 }
