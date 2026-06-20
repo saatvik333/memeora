@@ -65,10 +65,14 @@ fn find_ci(haystack: &str, needle: &str) -> Option<usize> {
 pub fn redact(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut word = String::new();
+    // Whether the previous word was an auth scheme ("Bearer"/"Basic"), so the token
+    // that follows it is redacted even without a recognizable prefix.
+    let mut after_auth_scheme = false;
     for ch in text.chars() {
         if ch.is_whitespace() {
             if !word.is_empty() {
-                out.push_str(&redact_word(&word));
+                out.push_str(&redact_word(&word, after_auth_scheme));
+                after_auth_scheme = is_auth_scheme(&word);
                 word.clear();
             }
             out.push(ch); // preserve the exact whitespace char verbatim
@@ -77,7 +81,7 @@ pub fn redact(text: &str) -> String {
         }
     }
     if !word.is_empty() {
-        out.push_str(&redact_word(&word));
+        out.push_str(&redact_word(&word, after_auth_scheme));
     }
     out
 }
@@ -107,6 +111,11 @@ const SECRET_PREFIXES: &[&str] = &[
     "AKIA",
     "AIza",
     "glpat-",
+    // Stripe-style keys use an underscore, so the `sk-` prefix above does not cover them.
+    "sk_live_",
+    "sk_test_",
+    "rk_live_",
+    "rk_test_",
 ];
 
 /// Redact a single whitespace-delimited word, preserving non-secret text.
@@ -114,7 +123,28 @@ const SECRET_PREFIXES: &[&str] = &[
 /// Handles tokens wrapped in punctuation (quotes, brackets, trailing commas) by
 /// inspecting the alphanumeric core, so `"sk-…",` and a tab-indented `\tsk-…` are
 /// caught — not just a bare space-delimited token.
-fn redact_word(word: &str) -> String {
+fn redact_word(word: &str, after_auth_scheme: bool) -> String {
+    // A token right after an auth scheme ("Authorization: Bearer <tok>", "Basic
+    // <tok>") is a credential even without a recognizable prefix. Gate on token
+    // shape so an ordinary following word ("bearer of news") isn't masked.
+    if after_auth_scheme {
+        let core = word.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+        if looks_token(core) {
+            return word.replace(core, "[REDACTED]");
+        }
+    }
+    // Credential-in-URL: `scheme://user:pass@host` → mask just the userinfo, so a
+    // captured connection string (postgres://…, redis://…) can't leak its password.
+    if let Some(sep) = word.find("://") {
+        let after = sep + 3;
+        let rest = &word[after..];
+        if let Some(at) = rest.find('@') {
+            let host_start = rest.find('/').unwrap_or(rest.len());
+            if at > 0 && at < host_start {
+                return format!("{}[REDACTED]{}", &word[..after], &rest[at..]);
+            }
+        }
+    }
     // `key=value` / `key: value` with a sensitive key → mask only the value.
     if let Some(idx) = word.find(['=', ':']) {
         let (key, rest) = word.split_at(idx);
@@ -147,6 +177,25 @@ fn looks_secret(word: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || "-_+/=.".contains(c))
         && word.chars().any(|c| c.is_ascii_alphabetic())
         && word.chars().any(|c| c.is_ascii_digit())
+}
+
+/// Whether a word is an auth scheme keyword whose following token is a credential.
+fn is_auth_scheme(word: &str) -> bool {
+    let core = word
+        .trim_matches(|c: char| !c.is_ascii_alphanumeric())
+        .to_ascii_lowercase();
+    core == "bearer" || core == "basic"
+}
+
+/// Whether a bare token (no known prefix) is long/mixed enough to be a credential
+/// rather than a prose word — used only after an auth-scheme cue, to bound false
+/// positives on ordinary following words.
+fn looks_token(core: &str) -> bool {
+    core.len() >= 12
+        && core
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_+/=.".contains(c))
+        && core.chars().any(|c| c.is_ascii_digit())
 }
 
 #[cfg(test)]
@@ -213,5 +262,44 @@ mod tests {
             sanitize("I prefer dark mode in my editor"),
             "I prefer dark mode in my editor"
         );
+    }
+
+    #[test]
+    fn redacts_credential_in_url() {
+        // Connection strings are the dominant secret shape in captured command args.
+        let out = redact("ran psql postgres://admin:hunter2pw@db.internal/prod ok");
+        assert!(
+            out.contains("postgres://[REDACTED]@db.internal/prod"),
+            "userinfo not masked: {out:?}"
+        );
+        assert!(!out.contains("hunter2pw"), "password leaked: {out:?}");
+        assert!(out.contains("ran psql") && out.contains(" ok"));
+        // A normal URL with no credentials must be left untouched.
+        assert_eq!(
+            redact("see https://example.com/docs"),
+            "see https://example.com/docs"
+        );
+    }
+
+    #[test]
+    fn redacts_bearer_token_but_not_prose() {
+        let out = redact("Authorization: Bearer abc123def456ghi789xyz");
+        assert!(
+            out.contains("[REDACTED]"),
+            "bearer token not masked: {out:?}"
+        );
+        assert!(!out.contains("abc123def456"));
+        // The word after "bearer" in ordinary prose must NOT be redacted.
+        assert_eq!(redact("the bearer of bad news"), "the bearer of bad news");
+    }
+
+    #[test]
+    fn redacts_underscored_provider_key() {
+        // `sk_live_…` is distinct from the hyphenated `sk-` prefix.
+        // Bare token under 32 chars: only the prefix (not the high-entropy rule) catches it.
+        let out = redact("billing key sk_live_51HxyzABCDEF here");
+        assert!(out.contains("[REDACTED]"), "{out:?}");
+        assert!(!out.contains("sk_live_51Hxyz"));
+        assert!(out.contains("billing key") && out.contains("here"));
     }
 }
