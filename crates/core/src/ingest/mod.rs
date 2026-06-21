@@ -60,12 +60,39 @@ impl Default for IngestParams {
 /// What [`ingest`] did, by memory id.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct IngestOutcome {
-    /// Ids of newly inserted memories.
+    /// Ids of newly inserted memories (includes the new version of a supersession).
     pub added: Vec<String>,
     /// Ids of existing memories that were reinforced by a near-duplicate.
     pub reinforced: Vec<String>,
+    /// Ids of prior memories soft-superseded by a correcting statement (kept as history).
+    pub superseded: Vec<String>,
     /// Number of `extends` edges created.
     pub edges_added: usize,
+}
+
+/// Explicit correction cues — the statement *replaces* a prior belief rather than
+/// restating it. Deliberately tight: a false positive only supersedes when there is
+/// also a same-topic memory to replace, and the prior version is preserved (never
+/// hard-deleted), so a wrong call stays recoverable. The opt-in NLI tier (P6) is the
+/// upgrade path for contradiction-driven supersession.
+// ponytail: keyword floor; replace with NLI when the LLM tier lands.
+const CORRECTION_CUES: &[&str] = &[
+    "actually",
+    "no longer",
+    "not anymore",
+    "correction:",
+    "scratch that",
+    "i changed",
+    "we changed",
+    "used to",
+    "i now ",
+    "we now ",
+];
+
+/// Whether `content` carries an explicit correction cue.
+fn is_correction(content: &str) -> bool {
+    let lower = content.to_lowercase();
+    CORRECTION_CUES.iter().any(|cue| lower.contains(cue))
 }
 
 /// Deterministic, container-scoped id for a memory's content (128-bit, content-addressed).
@@ -170,9 +197,13 @@ pub fn ingest_prepared(
             continue;
         }
 
-        // One KNN lookup serves both dedup and linking. Scope the immutable borrow
-        // so it ends before the mutable writes below; carry only owned decisions out.
-        let (duplicate_id, link_targets) = {
+        // A correcting statement replaces the same-topic belief instead of adding to it.
+        let correction = is_correction(&candidate.content);
+
+        // One KNN lookup serves dedup, linking, and supersede targeting. Scope the
+        // immutable borrow so it ends before the mutable writes below; carry only owned
+        // decisions out.
+        let (duplicate_id, link_targets, supersede_target) = {
             let neighbors = store.knn(container_tag, &embedding, params.link_candidates.max(1))?;
             // Reinforce the nearest same-kind near-duplicate (scan, don't just check
             // rank 1 — a closer different-kind neighbor must not shadow it).
@@ -180,7 +211,21 @@ pub fn ingest_prepared(
                 .iter()
                 .find(|n| n.score <= params.dedup_max_distance && n.memory.kind == candidate.kind)
                 .map(|n| n.memory.id.clone());
-            let link_targets: Vec<String> = if duplicate_id.is_some() {
+            // On a correction, the closest same-kind memory within the topic
+            // neighbourhood (≤ extends distance) is the belief being corrected.
+            let supersede_target = correction
+                .then(|| {
+                    neighbors
+                        .iter()
+                        .find(|n| {
+                            n.memory.kind == candidate.kind
+                                && n.score <= params.extends_max_distance
+                        })
+                        .map(|n| n.memory.id.clone())
+                })
+                .flatten();
+            let link_targets: Vec<String> = if duplicate_id.is_some() || supersede_target.is_some()
+            {
                 Vec::new()
             } else {
                 // `extends` links go to neighbors beyond the dedup window but still
@@ -195,8 +240,27 @@ pub fn ingest_prepared(
                     .map(|n| n.memory.id.clone())
                     .collect()
             };
-            (duplicate_id, link_targets)
+            (duplicate_id, link_targets, supersede_target)
         };
+
+        // A correction supersedes its topic neighbour: the new statement becomes the
+        // current version, the prior one is kept as history (never hard-deleted). This
+        // takes precedence over corroboration — the cue says "replace", not "confirm".
+        if let Some(old) = supersede_target {
+            let memory = candidate.into_memory(id.clone(), container_tag, embedding);
+            if store.supersede(&old, &memory)? {
+                store.link_entities(&id, container_tag, &entities)?;
+                outcome.superseded.push(old);
+                outcome.added.push(id);
+            } else {
+                // Target vanished mid-batch: insert the memory we built rather than
+                // dropping the statement.
+                store.upsert(&memory)?;
+                store.link_entities(&id, container_tag, &entities)?;
+                outcome.added.push(id);
+            }
+            continue;
+        }
 
         if let Some(dup) = duplicate_id {
             // A distinct near-duplicate is independent corroboration, not mere
@@ -539,6 +603,8 @@ mod tests {
             content: content.to_string(),
             kind,
             expires_at: None,
+            occurred_start: None,
+            occurred_end: None,
             confidence: 1.0,
         };
         let good = (
@@ -658,5 +724,81 @@ mod tests {
             1,
             "exact re-ingest must not inflate proof_count"
         );
+    }
+
+    fn fact(content: &str) -> Candidate {
+        Candidate {
+            content: content.to_string(),
+            kind: crate::store::MemoryKind::Fact,
+            expires_at: None,
+            occurred_start: None,
+            occurred_end: None,
+            confidence: 1.0,
+        }
+    }
+
+    #[test]
+    fn correction_cue_supersedes_topical_neighbor() {
+        // A statement with a correction cue, near (same topic, ≤ extends) a prior
+        // same-kind belief, supersedes it: new current version, old kept as history.
+        let correction = "Actually I no longer use MySQL, switching to Postgres";
+        let embedder = MapEmbedder::new(&[
+            ("I use MySQL", vec![1.0, 0.0, 0.0]),
+            (correction, vec![0.9, 0.4, 0.0]), // ~0.41 from the first: topic, not dup
+        ]);
+        let mut store = SqliteStore::open_in_memory(3).unwrap();
+        let tag = "t";
+        let p = IngestParams::default();
+
+        let a =
+            ingest_candidates(&mut store, &embedder, tag, vec![fact("I use MySQL")], &p).unwrap();
+        assert_eq!(a.added.len(), 1);
+
+        let b = ingest_candidates(&mut store, &embedder, tag, vec![fact(correction)], &p).unwrap();
+        assert_eq!(
+            b.added.len(),
+            1,
+            "the correction is the new current version"
+        );
+        assert_eq!(b.superseded, a.added, "and supersedes the prior belief");
+
+        // Only the new version is active; the old one survives as history.
+        assert_eq!(store.count(tag).unwrap(), 1);
+        assert_eq!(store.list_latest(tag, 10).unwrap()[0].id, b.added[0]);
+        assert!(!store.get(&a.added[0]).unwrap().unwrap().is_latest);
+        // An `updates` edge records the supersession, and the lineage is retrievable.
+        let edges = store.edges_from(&b.added[0]).unwrap();
+        assert_eq!(
+            (edges.len(), edges[0].kind, edges[0].to_id.as_str()),
+            (1, EdgeKind::Updates, a.added[0].as_str())
+        );
+        assert_eq!(store.history(&a.added[0]).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn correction_without_topical_neighbor_just_inserts() {
+        // A correction cue with no same-topic memory to replace must not supersede a
+        // stranger — it's simply a new memory.
+        let correction = "Actually I switched to Postgres";
+        let embedder = MapEmbedder::new(&[
+            ("I prefer dark mode", vec![1.0, 0.0, 0.0]),
+            (correction, vec![0.0, 0.0, 1.0]), // far from the first
+        ]);
+        let mut store = SqliteStore::open_in_memory(3).unwrap();
+        let tag = "t";
+        let p = IngestParams::default();
+
+        ingest_candidates(
+            &mut store,
+            &embedder,
+            tag,
+            vec![fact("I prefer dark mode")],
+            &p,
+        )
+        .unwrap();
+        let b = ingest_candidates(&mut store, &embedder, tag, vec![fact(correction)], &p).unwrap();
+        assert_eq!(b.added.len(), 1);
+        assert!(b.superseded.is_empty(), "no neighbour ⇒ no supersession");
+        assert_eq!(store.count(tag).unwrap(), 2);
     }
 }

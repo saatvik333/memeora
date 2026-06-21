@@ -135,10 +135,19 @@ impl HeuristicExtractor {
             return None;
         };
 
+        // Record when the statement says the event occurred (valid-time), if it
+        // carries a temporal cue — distinct from when it was learned.
+        let (occurred_start, occurred_end) =
+            match crate::temporal::parse(sentence, crate::store::now_unix()) {
+                Some((start, end)) => (Some(start), end),
+                None => (None, None),
+            };
         Some(Candidate {
             content: sentence.to_string(),
             kind,
             expires_at: None,
+            occurred_start,
+            occurred_end,
             confidence,
         })
     }

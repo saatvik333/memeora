@@ -43,7 +43,7 @@ The performance-critical stack has **first-class Rust libraries** (all Context7-
 - SQLite via **`rusqlite`** (bundled). **Register `sqlite-vec` *statically*** via the crate's `sqlite3_auto_extension`/init entrypoint (NOT runtime `load_extension`, which needs a dynamic `.so/.dylib/.dll` and breaks the single-distributable goal; reserve `load_extension` for `doctor`/dev only). Schema migrations via **`rusqlite_migration`** (`user_version`). `vec0` supports `float[N]`/`int8`/`bit[N]`, **KNN + metadata filters in one WHERE**, and `vec_quantize_binary()` — with limits to design around: **max 16 metadata columns** and restricted operators; vec0 is **brute-force, pre-v1**.
 - **Hybrid search:** dense (sqlite-vec) + lexical **BM25 (FTS5)** fused with **Reciprocal Rank Fusion (RRF)** → optional **cross-encoder rerank** (`fastembed-rs` `TextRerank`). Modes `hybrid` (default)/`memories`/`documents`. Benchmarks: SQLite+FTS5+sqlite-vec is fastest (~0.1–1ms) and ≥ others once reranked; 100% recall (brute force) well within personal-store size.
 - **`VectorStore` trait** → SQLite is the **default for personal-memory scale** (not framed as "fastest benchmarked" — the cited bench is small-N); a switch to **LanceDB** (Rust-native) for large/codebase-scale is **benchmark-driven**, and on *filtered* workloads LanceDB's own docs suggest `IVF_PQ`/`IVF_RQ` over `IVF_HNSW_SQ`.
-- DB at `~/.memeora/memory.db`. Tables: `memories` (content, kind, container_tag, is_latest, strength, created/last_accessed, expires_at, metadata, plus the step-11 columns parent_id/root_id, occurred_start/end, proof_count, stability, access_count), `vec_memories` (the `vec0` embedding index), `fts_memories` (FTS5 lexical index), `relationships`(from_id, to_id, kind — only `extends` is created today; `updates`/`derives` are reserved enum values), and a `meta` table recording the embedding dim. (`documents`/`profiles` are planned tables, not yet created — profiles are computed in memory and cached, not stored.)
+- DB at `~/.memeora/memory.db`. Tables: `memories` (content, kind, container_tag, is_latest, strength, created/last_accessed, expires_at, metadata, plus the step-11 columns parent_id/root_id, occurred_start/end, proof_count, stability, access_count), `vec_memories` (the `vec0` embedding index), `fts_memories` (FTS5 lexical index), `relationships`(from_id, to_id, kind — `extends` (moderate similarity) and `updates` (supersession) are created today; `derives` is a reserved enum value), and a `meta` table recording the embedding dim. (`documents`/`profiles` are planned tables, not yet created — profiles are computed in memory and cached, not stored.)
 
 ### 3. Extraction — a **user-chosen tier ladder** (heuristic floor by default; Queued→Extract→Chunk→Embed→Index→Done)
 The only tier enabled out of the box is the heuristic floor; **every tier above it is the user's explicit choice** (`extractor = heuristic | local-llm | external`; detection ≠ activation; `localhost` = local, external = consented). Policy + rationale in **`docs/VISION.md`**.
@@ -225,6 +225,17 @@ memeora must be **easy for the open-source community to extend to new harnesses*
 > with `EmbeddingProvider::is_local`. **Still deferred:** (a) the benchmark harness; the
 > **temporal** recall channel + token-budget recall; evidence-quote/source-set-union
 > consolidation + bi-temporal queries; edge decay; and (e)/(f) surface-reach + scale.
+
+> **VISION-gap program — Phase 1 (2026-06-21, on `main`).** Bi-temporal valid-time +
+> version chains wired (both were schema-ready but unused). New `crate::temporal` parses a
+> coarse *occurred* interval — relative phrases, "`<n>` units ago", ISO dates, over UTC
+> days — into `Candidate.occurred_start/end`, so a memory records *when an event happened*
+> vs `created_at` (*when learned*). `VectorStore::supersede` links a correcting statement
+> into the version chain (`parent_id`/`root_id`, old version `is_latest = 0` but preserved,
+> `updates` edge) and `history(root_id)` returns the full lineage — nothing hard-deleted.
+> Ingestion triggers it conservatively: an explicit correction cue (`actually`, `no longer`,
+> …) against a same-topic same-kind neighbour. NLI-driven contradiction supersession is the
+> opt-in LLM tier (Phase 6). Unblocks the temporal recall channel (Phase 2).
 
 **Post-review hardening (applied after a full codebase review):** `upsert` is now an
 edge-preserving in-place UPDATE (delete-then-insert previously cascade-deleted a node's

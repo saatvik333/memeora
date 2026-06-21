@@ -301,6 +301,9 @@ fn repair_candidate(raw: RawCandidate) -> Option<Candidate> {
         content,
         kind: MemoryKind::from_str_lossy(&raw.kind.to_lowercase()),
         expires_at: None,
+        // The opt-in LLM tier can populate occurred-time later; the floor leaves it unset.
+        occurred_start: None,
+        occurred_end: None,
         confidence: LLM_CONFIDENCE,
     })
 }

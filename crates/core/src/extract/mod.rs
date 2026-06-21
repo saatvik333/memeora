@@ -25,6 +25,11 @@ pub struct Candidate {
     pub kind: MemoryKind,
     /// Optional expiry carried from a temporal phrase (Unix seconds).
     pub expires_at: Option<i64>,
+    /// Bi-temporal valid-time start: when the event occurred, if the text named a
+    /// time (vs `created_at` = when learned). `None` when no temporal cue was found.
+    pub occurred_start: Option<i64>,
+    /// Bi-temporal valid-time end, for a bounded occurrence ("last week").
+    pub occurred_end: Option<i64>,
     /// Extractor confidence in `[0, 1]` — a filtering signal, not stored.
     pub confidence: f32,
 }
@@ -40,6 +45,8 @@ impl Candidate {
     ) -> Memory {
         let mut memory = Memory::new(id, self.content, self.kind, container_tag, embedding);
         memory.expires_at = self.expires_at;
+        memory.occurred_start = self.occurred_start;
+        memory.occurred_end = self.occurred_end;
         memory
     }
 }

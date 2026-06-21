@@ -252,6 +252,43 @@ pub trait VectorStore {
     /// never hard-deleted (it stays fetchable by [`get`](VectorStore::get)).
     fn forget(&mut self, id: &str) -> Result<()>;
 
+    /// Supersede `old_id` with `new`: store `new` as the current version linked into
+    /// the version chain (`parent_id = old_id`, `root_id` = the old version's root, or
+    /// `old_id` when the old version is itself a root), soft-forget the old version
+    /// (kept as history, dropped from active retrieval), and record a
+    /// `new --updates--> old` edge. Returns `Ok(false)` if `old_id` is unknown (no-op).
+    ///
+    /// Nothing is hard-deleted — the prior version stays `get`-able and on the chain.
+    /// The default composes the trait's own atomic writes; wrap a standalone call in a
+    /// store transaction (e.g. [`SqliteStore::transaction`]) when unit atomicity matters
+    /// — the daemon already runs ingestion inside one.
+    ///
+    /// [`SqliteStore::transaction`]: sqlite::SqliteStore::transaction
+    fn supersede(&mut self, old_id: &str, new: &Memory) -> Result<bool> {
+        // Self-supersession is meaningless (and would forget the row we just wrote);
+        // an exact restatement is a reinforce, handled upstream.
+        if new.id == old_id {
+            return Ok(false);
+        }
+        let Some(old) = self.get(old_id)? else {
+            return Ok(false);
+        };
+        let mut linked = new.clone();
+        linked.parent_id = Some(old_id.to_string());
+        linked.root_id = Some(old.root_id.clone().unwrap_or_else(|| old_id.to_string()));
+        self.upsert(&linked)?;
+        self.forget(old_id)?;
+        self.add_edge(&linked.id, old_id, EdgeKind::Updates)?;
+        Ok(true)
+    }
+
+    /// The version chain for the lineage rooted at `root_id` (pass the root's own id),
+    /// newest first, **including** soft-superseded versions — so callers can show the
+    /// full history of a belief. Default: empty, for stores without a version chain.
+    fn history(&self, _root_id: &str) -> Result<Vec<Memory>> {
+        Ok(Vec::new())
+    }
+
     /// Link `memory_id` to its canonical `entities` within `container_tag`, creating
     /// the entities as needed. Idempotent. Default: no-op, for stores without an
     /// entity index.

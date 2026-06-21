@@ -101,6 +101,8 @@ impl Preparer {
                     content,
                     kind: MemoryKind::from_str_lossy(&kind),
                     expires_at: None,
+                    occurred_start: None,
+                    occurred_end: None,
                     confidence: 1.0,
                 };
                 let mut prepared = embed_candidates(self.embedder.as_ref(), vec![candidate])?;

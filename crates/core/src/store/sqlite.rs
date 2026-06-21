@@ -551,6 +551,21 @@ impl VectorStore for SqliteStore {
         Ok(())
     }
 
+    fn history(&self, root_id: &str) -> Result<Vec<Memory>> {
+        // The root row carries `id = root_id` (its own `root_id` is NULL); every
+        // superseding version carries `root_id = root_id`. Newest first so the current
+        // version (if still on this lineage) leads.
+        let sql = format!(
+            "SELECT {MEMORY_COLS} FROM memories m
+             WHERE m.root_id = ?1 OR m.id = ?1
+             ORDER BY m.created_at DESC, m.rowid DESC"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![root_id], row_to_memory)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
     fn link_entities(
         &mut self,
         memory_id: &str,
@@ -1130,5 +1145,62 @@ mod tests {
         assert_eq!(g.len(), 1);
         assert_eq!(g[0].memory.id, "n");
         assert_eq!(g[0].score, 2.0, "shared count aggregates across both seeds");
+    }
+
+    #[test]
+    fn supersede_links_chain_and_preserves_history() {
+        let mut s = SqliteStore::open_in_memory(2).unwrap();
+        let tag = "t";
+        s.upsert(&mem("old", "I use MySQL", tag, vec![1.0, 0.0]))
+            .unwrap();
+        let new = mem("new", "I use Postgres now", tag, vec![0.0, 1.0]);
+        assert!(s.supersede("old", &new).unwrap());
+
+        // New is the current version, linked to old as both parent and lineage root.
+        let n = s.get("new").unwrap().unwrap();
+        assert!(n.is_latest);
+        assert_eq!(n.parent_id.as_deref(), Some("old"));
+        assert_eq!(n.root_id.as_deref(), Some("old"));
+        // Old is soft-forgotten but preserved — never hard-deleted.
+        assert!(!s.get("old").unwrap().unwrap().is_latest);
+        // A new --updates--> old edge records the supersession.
+        let edges = s.edges_from("new").unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(
+            (edges[0].to_id.as_str(), edges[0].kind),
+            ("old", EdgeKind::Updates)
+        );
+        // Active retrieval sees only the current version...
+        assert_eq!(s.count(tag).unwrap(), 1);
+        assert_eq!(s.list_latest(tag, 10).unwrap()[0].id, "new");
+        // ...but history shows the full lineage, newest first.
+        assert_eq!(
+            s.history("old")
+                .unwrap()
+                .iter()
+                .map(|m| m.id.clone())
+                .collect::<Vec<_>>(),
+            vec!["new", "old"]
+        );
+
+        // A further correction keeps the original lineage root.
+        assert!(
+            s.supersede(
+                "new",
+                &mem("newer", "I use SQLite now", tag, vec![0.0, 0.0])
+            )
+            .unwrap()
+        );
+        let nw = s.get("newer").unwrap().unwrap();
+        assert_eq!(nw.parent_id.as_deref(), Some("new"));
+        assert_eq!(nw.root_id.as_deref(), Some("old"), "root stays the origin");
+        assert_eq!(s.history("old").unwrap().len(), 3);
+
+        // Unknown old id and self-supersession are both no-ops.
+        assert!(
+            !s.supersede("nope", &mem("z", "z", tag, vec![1.0, 0.0]))
+                .unwrap()
+        );
+        assert!(!s.supersede("newer", &nw).unwrap());
     }
 }

@@ -20,6 +20,7 @@ pub mod privacy;
 pub mod profile;
 pub mod search;
 pub mod store;
+pub mod temporal;
 
 pub use dynamics::decayed_strength;
 pub use embed::{CachingEmbedder, EmbeddingProvider, EmbeddingSpace};
