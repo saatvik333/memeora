@@ -77,23 +77,50 @@ impl LlmConfig {
     }
 }
 
-/// Whether `url`'s host is loopback (so it's allowed under local-first).
-fn host_is_local(url: &str) -> bool {
-    // Strip the URL fragment FIRST: `#` ends the authority, so `evil.com#@localhost`
-    // has host `evil.com`, not `localhost`. Without this, a crafted endpoint slips a
-    // fake `@localhost` into the fragment and bypasses the egress-consent gate.
-    let url = url.split('#').next().unwrap_or(url);
+/// The authority of `url`: the substring after `://` up to the first `/`, `?`, or
+/// `#` — the three characters RFC 3986 §3.2 uses to terminate the authority. Treating
+/// all three as terminators is what stops a spoofed `evil.com#@localhost` or
+/// `evil.com?@localhost` from smuggling a fake host past the consent gate.
+fn authority_of(url: &str) -> &str {
     let after_scheme = url.split("://").nth(1).unwrap_or(url);
-    let authority = after_scheme.split('/').next().unwrap_or("");
-    // Drop any userinfo, then take the host (before the port); handle [::1]:port.
+    after_scheme.split(['/', '?', '#']).next().unwrap_or("")
+}
+
+/// Split an authority into its lowercased host and port (default 80), dropping any
+/// `userinfo@` and `[ipv6]` brackets. ONE host parser, shared by the consent check
+/// ([`host_is_local`]) and the actual connection ([`split_url`]), so the two can never
+/// disagree on which host is in play — the property the egress gate depends on.
+fn split_host_port(authority: &str) -> Result<(String, u16)> {
+    // The host is what follows the last `@` (userinfo is `user:pass@`, not the host).
     let hostport = authority.rsplit('@').next().unwrap_or(authority);
-    let host = if let Some(rest) = hostport.strip_prefix('[') {
-        rest.split(']').next().unwrap_or(rest)
+    let (host, port_str) = if let Some(rest) = hostport.strip_prefix('[') {
+        // IPv6 `[addr]` / `[addr]:port`: strip brackets so the bare address reaches
+        // TcpStream::connect, and the inner colons don't confuse the port split.
+        let (host, after) = rest.split_once(']').unwrap_or((rest, ""));
+        (host, after.strip_prefix(':'))
     } else {
-        hostport.split(':').next().unwrap_or(hostport)
+        match hostport.rsplit_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (hostport, None),
+        }
     };
-    // Hostnames are case-insensitive, so `LOCALHOST` is loopback too.
-    let host = host.to_ascii_lowercase();
+    let port = match port_str {
+        Some(p) => p.parse::<u16>().map_err(|_| {
+            Error::Llm(format!("invalid port {p:?} in URL authority {authority:?}"))
+        })?,
+        None => 80,
+    };
+    // Hostnames are case-insensitive, so `LOCALHOST` matches loopback too.
+    Ok((host.to_ascii_lowercase(), port))
+}
+
+/// Whether `url`'s host is loopback (so it's allowed under local-first). A malformed
+/// authority (e.g. a bad port) is treated as non-local — failing closed toward
+/// requiring explicit consent.
+fn host_is_local(url: &str) -> bool {
+    let Ok((host, _)) = split_host_port(authority_of(url)) else {
+        return false;
+    };
     matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1") || host.ends_with(".localhost")
 }
 
@@ -145,36 +172,22 @@ impl LlmTransport for HttpTransport {
 }
 
 /// Split `http://host[:port]/path` into `(host, port, path)`. Port defaults to 80.
-/// Only `http://` (loopback) is supported — TLS is out of the minimal transport's scope.
+/// Only `http://` (loopback) is supported — TLS is out of the minimal transport's
+/// scope. Host/port come from [`split_host_port`] — the same parser the consent gate
+/// uses — so the connected host always matches the classified one.
 fn split_url(url: &str) -> Result<(String, u16, String)> {
     let rest = url.strip_prefix("http://").ok_or_else(|| {
         Error::Llm(format!(
             "only http:// (loopback) endpoints are supported by the built-in transport, got {url:?}"
         ))
     })?;
-    let (authority, path) = match rest.find('/') {
-        Some(i) => (&rest[..i], &rest[i..]),
-        None => (rest, "/"),
-    };
-    let parse_port = |p: &str| {
-        p.parse::<u16>()
-            .map_err(|_| Error::Llm(format!("invalid port {p:?} in URL {url:?}")))
-    };
-    let (host, port) = if let Some(rest) = authority.strip_prefix('[') {
-        // IPv6: `[host]` or `[host]:port`. Strip the brackets so the bare address
-        // reaches TcpStream::connect (which rejects the bracketed form), and don't let
-        // the colons inside the address confuse the port split.
-        let (host, after) = rest.split_once(']').unwrap_or((rest, ""));
-        let port = match after.strip_prefix(':') {
-            Some(p) => parse_port(p)?,
-            None => 80,
-        };
-        (host.to_string(), port)
+    // Authority ends at the first '/', '?', or '#'; whatever follows is the request path.
+    let auth_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (host, port) = split_host_port(&rest[..auth_end])?;
+    let path = if rest[auth_end..].starts_with('/') {
+        &rest[auth_end..]
     } else {
-        match authority.rsplit_once(':') {
-            Some((h, p)) => (h.to_string(), parse_port(p)?),
-            None => (authority.to_string(), 80),
-        }
+        "/"
     };
     Ok((host, port, path.to_string()))
 }
@@ -347,6 +360,12 @@ mod tests {
         assert!(!cfg("http://evil.com#@localhost/", false).is_allowed());
         // Host comparison is case-insensitive: LOCALHOST is still loopback.
         assert!(cfg("http://LOCALHOST:11434/v1", false).is_allowed());
+        // A query string before any path is also an authority terminator — a spoofed
+        // `?@localhost` must NOT win (the parser-divergence hardening).
+        assert!(!cfg("http://evil.com?@localhost", false).is_allowed());
+        // userinfo is stripped: the host AFTER the last `@` is authoritative.
+        assert!(!cfg("http://localhost@evil.com/v1", false).is_allowed());
+        assert!(cfg("http://user:pass@127.0.0.1:11434/v1", false).is_allowed());
     }
 
     #[test]
@@ -425,5 +444,10 @@ mod tests {
         );
         // A malformed port is a hard error, not a silent fallback to 80.
         assert!(split_url("http://localhost:notaport/v1").is_err());
+        // userinfo is stripped, so the connected host matches the consent check.
+        assert_eq!(
+            split_url("http://user:pass@localhost:11434/v1").unwrap(),
+            ("localhost".to_string(), 11434, "/v1".to_string())
+        );
     }
 }
