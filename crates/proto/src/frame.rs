@@ -61,6 +61,7 @@ mod tests {
             scope: "s".into(),
             query: "q".into(),
             k: 3,
+            max_tokens: None,
         };
         let mut buf = Vec::new();
         write_message(&mut buf, &req).unwrap();

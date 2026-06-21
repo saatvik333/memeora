@@ -282,6 +282,7 @@ mod tests {
                 scope: "s".into(),
                 query: "I prefer dark mode".into(),
                 k: 5,
+                max_tokens: None,
             },
         )
         .unwrap();
@@ -329,6 +330,7 @@ mod tests {
                         scope: "s".into(),
                         query: content,
                         k: 1,
+                        max_tokens: None,
                     },
                 )
                 .unwrap();

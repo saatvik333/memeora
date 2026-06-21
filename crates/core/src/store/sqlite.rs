@@ -627,25 +627,37 @@ impl VectorStore for SqliteStore {
             return Ok(Vec::new());
         }
         // One global aggregation across all seeds in a single query. A per-seed LIMIT
-        // would silently drop a neighbor that is weakly shared with many seeds but
-        // strong overall, corrupting the top-k. Seed ids are store-controlled and bound
-        // as parameters.
-        let placeholders = vec!["?"; seed_ids.len()].join(",");
+        // would silently drop a neighbor weakly shared with many seeds but strong
+        // overall, corrupting the top-k. Activation = a bounded saturating shared-entity
+        // term + the strongest graph-edge bonus to any seed, so a directly-linked
+        // neighbour outranks one merely sharing an entity. The MIN(...,5)/5 saturation is
+        // a SQLite-native stand-in for VISION's `tanh(shared·0.5)` (same ranking; RRF
+        // fuses by rank, not magnitude; avoids relying on the optional SQL math ext).
+        // Seed ids are store-controlled and bound as parameters (4 groups: two edge
+        // sides, the seed set, and the exclusion set).
+        let ph = vec!["?"; seed_ids.len()].join(",");
         let sql = format!(
-            "SELECT {MEMORY_COLS}, COUNT(*) AS shared
+            "SELECT {MEMORY_COLS},
+                (MIN(COUNT(DISTINCT me2.entity_id), 5) / 5.0)
+                + MAX(CASE WHEN r.kind = 'extends' THEN 0.85
+                           WHEN r.kind IS NOT NULL THEN 1.0
+                           ELSE 0.0 END) AS score
              FROM memory_entities me1
              JOIN memory_entities me2 ON me1.entity_id = me2.entity_id
              JOIN memories m ON m.id = me2.memory_id
-             WHERE me1.memory_id IN ({placeholders})
-               AND me2.memory_id NOT IN ({placeholders})
+             LEFT JOIN relationships r
+               ON (r.from_id = m.id AND r.to_id IN ({ph}))
+               OR (r.to_id = m.id AND r.from_id IN ({ph}))
+             WHERE me1.memory_id IN ({ph}) AND me2.memory_id NOT IN ({ph})
                AND m.container_tag = ? AND m.is_latest = 1
              GROUP BY m.id
-             ORDER BY shared DESC, m.id
+             ORDER BY score DESC, m.id
              LIMIT ?"
         );
-        let mut sql_params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(seed_ids.len() * 2 + 2);
-        sql_params.extend(seed_ids.iter().map(|s| s as &dyn rusqlite::ToSql));
-        sql_params.extend(seed_ids.iter().map(|s| s as &dyn rusqlite::ToSql));
+        let mut sql_params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(seed_ids.len() * 4 + 2);
+        for _ in 0..4 {
+            sql_params.extend(seed_ids.iter().map(|s| s as &dyn rusqlite::ToSql));
+        }
         sql_params.push(&container_tag);
         let k = k as i64;
         sql_params.push(&k);
@@ -654,9 +666,48 @@ impl VectorStore for SqliteStore {
         let rows = stmt.query_map(sql_params.as_slice(), |row| {
             Ok(ScoredMemory {
                 memory: row_to_memory(row)?,
-                score: row.get::<_, i64>("shared")? as f32,
+                score: row.get::<_, f64>("score")? as f32,
             })
         })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    fn temporal_search(
+        &self,
+        container_tag: &str,
+        window: (i64, Option<i64>),
+        k: usize,
+    ) -> Result<Vec<ScoredMemory>> {
+        if k == 0 {
+            return Ok(Vec::new());
+        }
+        let (w_start, w_end) = (window.0, window.1.unwrap_or(window.0));
+        let w_mid = (w_start + w_end) / 2;
+        // Interval-overlap: a memory's [occurred_start, occurred_end||start] must
+        // intersect the query window [w_start, w_end]. Score = |midpoint distance|
+        // (lower = nearer), so the closest occurrences fuse highest.
+        let sql = format!(
+            "SELECT {MEMORY_COLS},
+                ABS(((m.occurred_start + COALESCE(m.occurred_end, m.occurred_start)) / 2) - ?4)
+                  AS distance
+             FROM memories m
+             WHERE m.container_tag = ?1 AND m.is_latest = 1 AND m.occurred_start IS NOT NULL
+               AND m.occurred_start <= ?3
+               AND COALESCE(m.occurred_end, m.occurred_start) >= ?2
+             ORDER BY distance ASC, m.id
+             LIMIT ?5"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            params![container_tag, w_start, w_end, w_mid, k as i64],
+            |row| {
+                Ok(ScoredMemory {
+                    memory: row_to_memory(row)?,
+                    score: row.get::<_, f64>("distance")? as f32,
+                })
+            },
+        )?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
     }
@@ -1115,7 +1166,8 @@ mod tests {
         let g = s.graph_search(tag, &["a".to_string()], 10).unwrap();
         assert_eq!(g.len(), 1);
         assert_eq!(g[0].memory.id, "b");
-        assert!(g[0].score >= 1.0);
+        // One shared entity, no edge: saturating term MIN(1,5)/5 = 0.2, bonus 0.
+        assert!((g[0].score - 0.2).abs() < 1e-6, "{}", g[0].score);
 
         // Seeds are excluded from their own neighbor results.
         assert!(
@@ -1144,7 +1196,12 @@ mod tests {
             .unwrap();
         assert_eq!(g.len(), 1);
         assert_eq!(g[0].memory.id, "n");
-        assert_eq!(g[0].score, 2.0, "shared count aggregates across both seeds");
+        // Two distinct shared entities (one per seed): MIN(2,5)/5 = 0.4, no edge bonus.
+        assert!(
+            (g[0].score - 0.4).abs() < 1e-6,
+            "shared entities aggregate across both seeds: {}",
+            g[0].score
+        );
     }
 
     #[test]
@@ -1202,5 +1259,57 @@ mod tests {
                 .unwrap()
         );
         assert!(!s.supersede("newer", &nw).unwrap());
+    }
+
+    #[test]
+    fn graph_search_edge_link_outranks_entity_only() {
+        // A neighbour directly graph-linked to a seed outranks one that merely shares
+        // more entities — the edge bonus dominates the saturating shared term.
+        let mut s = SqliteStore::open_in_memory(2).unwrap();
+        let tag = "t";
+        for id in ["a", "b", "c"] {
+            s.upsert(&mem(id, "x", tag, vec![1.0, 0.0])).unwrap();
+        }
+        s.link_entities("a", tag, &["e1".into(), "e2".into()])
+            .unwrap();
+        s.link_entities("b", tag, &["e1".into()]).unwrap(); // shares 1 with the seed
+        s.link_entities("c", tag, &["e1".into(), "e2".into()])
+            .unwrap(); // shares 2
+        s.add_edge("a", "b", EdgeKind::Extends).unwrap(); // but b is directly linked
+
+        let g = s.graph_search(tag, &["a".to_string()], 10).unwrap();
+        assert_eq!(g.len(), 2);
+        assert_eq!(
+            g[0].memory.id, "b",
+            "edge-linked neighbour ranks above entity-only"
+        );
+        assert!(g[0].score > g[1].score);
+        assert_eq!(g[1].memory.id, "c");
+    }
+
+    #[test]
+    fn temporal_search_overlaps_window_nearest_first() {
+        let mut s = SqliteStore::open_in_memory(2).unwrap();
+        let tag = "t";
+        let day = 86_400;
+        let base = 1_781_000_000;
+        let dated = |id: &str, start: i64, end: i64| {
+            let mut m = mem(id, "x", tag, vec![1.0, 0.0]);
+            m.occurred_start = Some(start);
+            m.occurred_end = Some(end);
+            m
+        };
+        s.upsert(&dated("in", base, base + day)).unwrap(); // overlaps, midpoint at window mid
+        s.upsert(&dated("near", base + day, base + 2 * day))
+            .unwrap(); // overlaps at boundary
+        s.upsert(&dated("out", base + 10 * day, base + 11 * day))
+            .unwrap(); // no overlap
+        s.upsert(&mem("undated", "x", tag, vec![1.0, 0.0])).unwrap(); // no occurred-time
+
+        let g = s
+            .temporal_search(tag, (base, Some(base + day)), 10)
+            .unwrap();
+        let ids: Vec<&str> = g.iter().map(|m| m.memory.id.as_str()).collect();
+        assert_eq!(ids, vec!["in", "near"], "overlapping only, nearest-first");
     }
 }

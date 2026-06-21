@@ -35,10 +35,12 @@ pub mod capability {
     pub const LIST: &str = "list";
     /// Soft-forget ([`Request::Forget`]).
     pub const FORGET: &str = "forget";
+    /// Token-budgeted recall (the `max_tokens` field on [`Request::Recall`]).
+    pub const TOKEN_BUDGET: &str = "token_budget";
 
     /// The full set a current daemon supports. Returned by the daemon in its
     /// handshake; kept here so client and server agree on the canonical list.
-    pub const ALL: &[&str] = &[INGEST, ADD, RECALL, CONTEXT, LIST, FORGET];
+    pub const ALL: &[&str] = &[INGEST, ADD, RECALL, CONTEXT, LIST, FORGET, TOKEN_BUDGET];
 }
 
 /// Build a local-socket [`Name`] from a string: a value containing a path
@@ -97,6 +99,12 @@ pub enum Request {
         query: String,
         /// Max results.
         k: usize,
+        /// Optional token budget: when set, the daemon fills results best-first up to
+        /// this many (estimated) tokens instead of a fixed `k` (which still caps the
+        /// count). Additive + defaulted, so older clients omit it — gate on the
+        /// `token_budget` capability. See [`capability::TOKEN_BUDGET`].
+        #[serde(default)]
+        max_tokens: Option<usize>,
     },
     /// Fetch the profile (static + dynamic) for a scope.
     Context {
@@ -214,6 +222,7 @@ mod tests {
                 scope: "repo_memeora".into(),
                 query: "language".into(),
                 k: 5,
+                max_tokens: Some(2000),
             },
             Request::Forget { id: "m1".into() },
         ];
@@ -241,6 +250,20 @@ mod tests {
     fn request_uses_op_discriminator() {
         let json = serde_json::to_string(&Request::Context { scope: "s".into() }).unwrap();
         assert!(json.contains("\"op\":\"context\""), "got: {json}");
+    }
+
+    #[test]
+    fn recall_without_max_tokens_is_back_compatible() {
+        // An older client's Recall (no max_tokens) must still parse — additive field,
+        // defaulted, no PROTOCOL_VERSION bump.
+        let json = r#"{"op":"recall","scope":"s","query":"q","k":5}"#;
+        match serde_json::from_str::<Request>(json).unwrap() {
+            Request::Recall { k, max_tokens, .. } => {
+                assert_eq!(k, 5);
+                assert!(max_tokens.is_none());
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
     }
 
     #[test]

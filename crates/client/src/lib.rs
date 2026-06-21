@@ -117,12 +117,25 @@ impl Client {
         }
     }
 
-    /// Hybrid search within a scope.
+    /// Hybrid search within a scope (plain top-`k`, no token budget).
     pub fn recall(&mut self, scope: &str, query: &str, k: usize) -> io::Result<Vec<MemoryDto>> {
+        self.recall_within(scope, query, k, None)
+    }
+
+    /// Hybrid search with an optional token budget: when `max_tokens` is set, the daemon
+    /// fills results best-first up to that many estimated tokens (still capped at `k`).
+    pub fn recall_within(
+        &mut self,
+        scope: &str,
+        query: &str,
+        k: usize,
+        max_tokens: Option<usize>,
+    ) -> io::Result<Vec<MemoryDto>> {
         match self.call(&Request::Recall {
             scope: scope.to_string(),
             query: query.to_string(),
             k,
+            max_tokens,
         })? {
             Response::Memories { memories } => Ok(memories),
             other => Err(unexpected(other)),

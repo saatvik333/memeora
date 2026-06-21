@@ -50,6 +50,7 @@ pub(crate) enum Prepared {
         query: String,
         query_embedding: Vec<f32>,
         k: usize,
+        max_tokens: Option<usize>,
     },
     Context {
         scope: String,
@@ -115,13 +116,19 @@ impl Preparer {
                     embedding,
                 }
             }
-            Request::Recall { scope, query, k } => {
+            Request::Recall {
+                scope,
+                query,
+                k,
+                max_tokens,
+            } => {
                 let query_embedding = self.embedder.embed_query(&query)?;
                 Prepared::Recall {
                     scope,
                     query,
                     query_embedding,
                     k,
+                    max_tokens,
                 }
             }
             Request::Context { scope } => Prepared::Context { scope },
@@ -280,9 +287,11 @@ impl Engine {
                 query,
                 query_embedding,
                 k,
+                max_tokens,
             } => {
                 let params = SearchParams {
                     k,
+                    max_tokens,
                     ..self.search_params.clone()
                 };
                 let hits = search(&self.store, &scope, &query_embedding, &query, &params)?;
@@ -417,6 +426,7 @@ mod tests {
             scope: scope.into(),
             query: "I prefer dark mode".into(),
             k: 5,
+            max_tokens: None,
         }) {
             Response::Memories { memories } => {
                 assert_eq!(memories.len(), 1);

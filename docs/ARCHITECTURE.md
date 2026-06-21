@@ -222,9 +222,9 @@ memeora must be **easy for the open-source community to extend to new harnesses*
 > recall **graph channel** (`graph_search` over shared entities) + bounded recency/proof
 > **boosts**; and the **opt-in local-LLM extractor** (`crate::extract::llm`, OpenAI-compatible,
 > off by default, loopback-allowed/remote-consented, heuristic fallback, graph self-repair)
-> with `EmbeddingProvider::is_local`. **Still deferred:** (a) the benchmark harness; the
-> **temporal** recall channel + token-budget recall; evidence-quote/source-set-union
-> consolidation + bi-temporal queries; edge decay; and (e)/(f) surface-reach + scale.
+> with `EmbeddingProvider::is_local`. **Still deferred:** (a) the benchmark harness;
+> evidence-quote/source-set-union consolidation (Phase 3); edge decay (Phase 5); and
+> (e)/(f) surface-reach + scale.
 
 > **VISION-gap program — Phase 1 (2026-06-21, on `main`).** Bi-temporal valid-time +
 > version chains wired (both were schema-ready but unused). New `crate::temporal` parses a
@@ -236,6 +236,17 @@ memeora must be **easy for the open-source community to extend to new harnesses*
 > Ingestion triggers it conservatively: an explicit correction cue (`actually`, `no longer`,
 > …) against a same-topic same-kind neighbour. NLI-driven contradiction supersession is the
 > opt-in LLM tier (Phase 6). Unblocks the temporal recall channel (Phase 2).
+
+> **VISION-gap program — Phase 2 (2026-06-21, on `main`).** Recall completion — four of
+> four channels live. The **temporal channel** is now the 4th RRF list (Hybrid): a date
+> in the query (parsed by `crate::temporal`) selects memories whose `occurred_*` interval
+> overlaps the window, nearest-first; a 3rd multiplicative **temporal-proximity boost**
+> joins recency × proof. **Token-budget fill** (`SearchParams.max_tokens`; additive
+> `Request::Recall.max_tokens` + the `token_budget` capability, **no `PROTOCOL_VERSION`
+> bump**; `MemeoraClient::recall_within`) replaces fixed top-`k` — fill best-first to a
+> token budget, with `k` still a hard cap. **Graph activation** is now a bounded saturating
+> shared-entity term + a graph-edge bonus (a directly-linked neighbour outranks one merely
+> sharing an entity), a SQLite-native stand-in for VISION's `tanh(shared·0.5)+edge_bonus`.
 
 **Post-review hardening (applied after a full codebase review):** `upsert` is now an
 edge-preserving in-place UPDATE (delete-then-insert previously cascade-deleted a node's
