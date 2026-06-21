@@ -37,10 +37,23 @@ pub mod capability {
     pub const FORGET: &str = "forget";
     /// Token-budgeted recall (the `max_tokens` field on [`Request::Recall`]).
     pub const TOKEN_BUDGET: &str = "token_budget";
+    /// Source-attributed ingestion (the `source` field on [`Request::Ingest`]) feeding
+    /// the distinct-source evidence model — repeated corroboration from one source can't
+    /// inflate proof, and recalled memories carry a `freshness` trend.
+    pub const EVIDENCE: &str = "evidence";
 
     /// The full set a current daemon supports. Returned by the daemon in its
     /// handshake; kept here so client and server agree on the canonical list.
-    pub const ALL: &[&str] = &[INGEST, ADD, RECALL, CONTEXT, LIST, FORGET, TOKEN_BUDGET];
+    pub const ALL: &[&str] = &[
+        INGEST,
+        ADD,
+        RECALL,
+        CONTEXT,
+        LIST,
+        FORGET,
+        TOKEN_BUDGET,
+        EVIDENCE,
+    ];
 }
 
 /// Build a local-socket [`Name`] from a string: a value containing a path
@@ -81,6 +94,13 @@ pub enum Request {
         scope: Scope,
         /// Raw conversation text.
         text: String,
+        /// Optional source/observer id (an agent or session). Repeated corroboration
+        /// from the same `source` can't inflate a memory's `proof_count` — only distinct
+        /// sources raise it. Additive + defaulted, so older clients omit it; gate on the
+        /// `evidence` capability. See [`capability::EVIDENCE`]. When absent, each distinct
+        /// statement stands in as its own source.
+        #[serde(default)]
+        source: Option<String>,
     },
     /// Add a single explicit memory.
     Add {
@@ -192,6 +212,11 @@ pub struct MemoryDto {
     /// Relevance score when returned from a search (`None` for plain listings).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub score: Option<f32>,
+    /// Coarse freshness/trend label (`new`/`strengthening`/`stable`/`weakening`/`stale`)
+    /// from decay × distinct-source proof. `None` from older daemons; gate on the
+    /// `evidence` capability. See [`capability::EVIDENCE`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<String>,
 }
 
 #[cfg(test)]
@@ -217,6 +242,7 @@ mod tests {
             Request::Ingest {
                 scope: "memeora_user_abc".into(),
                 text: "I prefer rust".into(),
+                source: Some("agent-x".into()),
             },
             Request::Recall {
                 scope: "repo_memeora".into(),
@@ -241,6 +267,7 @@ mod tests {
                 strength: 1.0,
                 created_at: 1_700_000_000,
                 score: Some(0.42),
+                freshness: Some("stable".into()),
             }],
         };
         assert_eq!(roundtrip_response(&resp), resp);
@@ -262,6 +289,17 @@ mod tests {
                 assert_eq!(k, 5);
                 assert!(max_tokens.is_none());
             }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ingest_without_source_is_back_compatible() {
+        // An older client's Ingest (no source) must still parse — additive field,
+        // defaulted, no PROTOCOL_VERSION bump.
+        let json = r#"{"op":"ingest","scope":"s","text":"I prefer rust"}"#;
+        match serde_json::from_str::<Request>(json).unwrap() {
+            Request::Ingest { source, .. } => assert!(source.is_none()),
             other => panic!("unexpected: {other:?}"),
         }
     }
@@ -329,8 +367,13 @@ mod tests {
             strength: 1.0,
             created_at: 1,
             score: None,
+            freshness: None,
         };
         let json = serde_json::to_string(&dto).unwrap();
         assert!(!json.contains("score"), "score should be omitted: {json}");
+        assert!(
+            !json.contains("freshness"),
+            "freshness should be omitted: {json}"
+        );
     }
 }

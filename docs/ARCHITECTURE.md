@@ -223,8 +223,8 @@ memeora must be **easy for the open-source community to extend to new harnesses*
 > **boosts**; and the **opt-in local-LLM extractor** (`crate::extract::llm`, OpenAI-compatible,
 > off by default, loopback-allowed/remote-consented, heuristic fallback, graph self-repair)
 > with `EmbeddingProvider::is_local`. **Still deferred:** (a) the benchmark harness;
-> evidence-quote/source-set-union consolidation (Phase 3); edge decay (Phase 5); and
-> (e)/(f) surface-reach + scale.
+> edge decay (Phase 5); LLM belief-phrasing/NLI (Phase 6); and (e)/(f) surface-reach + scale.
+> (Evidence-quote/distinct-source consolidation + freshness landed in Phase 3.)
 
 > **VISION-gap program — Phase 1 (2026-06-21, on `main`).** Bi-temporal valid-time +
 > version chains wired (both were schema-ready but unused). New `crate::temporal` parses a
@@ -247,6 +247,21 @@ memeora must be **easy for the open-source community to extend to new harnesses*
 > token budget, with `k` still a hard cap. **Graph activation** is now a bounded saturating
 > shared-entity term + a graph-edge bonus (a directly-linked neighbour outranks one merely
 > sharing an entity), a SQLite-native stand-in for VISION's `tanh(shared·0.5)+edge_bonus`.
+
+> **VISION-gap program — Phase 3 (2026-06-22, on `main`).** Observation/evidence model +
+> freshness. New **`evidence(memory_id, source_id, quote, occurred_at)`** table (migration
+> #5, composite PK) makes `proof_count` a denormalized cache of `COUNT(DISTINCT source_id)`:
+> `VectorStore::record_evidence` set-unions an observation and recomputes the count, so one
+> source restating a belief **can't** inflate proof — only distinct sources raise it (the
+> blind `corroborate` +1 is gone). Ingestion records originating evidence on every
+> insert/resurrect/supersede and corroborating evidence on a near-dup; `source` threads in
+> additively (`Request::Ingest.source` + the `evidence` capability, **no `PROTOCOL_VERSION`
+> bump**; `MemeoraClient::ingest_from`). When no source is given, each distinct statement
+> stands in as its own source (anonymous re-wordings still read as evidence; thread a real
+> session id for true per-source dedup — the surfaces do that later). **Freshness trends**
+> (`new | strengthening | stable | weakening | stale`, `dynamics::freshness`) are derived at
+> read time from decay × proof × age and surfaced on `MemoryDto.freshness` (additive). The
+> fuller evidence-density-window model is the documented upgrade path.
 
 **Post-review hardening (applied after a full codebase review):** `upsert` is now an
 edge-preserving in-place UPDATE (delete-then-insert previously cascade-deleted a node's

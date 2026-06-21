@@ -233,12 +233,21 @@ pub trait VectorStore {
     /// to now. A no-op if `id` is unknown.
     fn reinforce(&mut self, id: &str, delta: f32) -> Result<()>;
 
-    /// Corroborate a memory with a *distinct* equivalent statement: like
-    /// [`reinforce`](VectorStore::reinforce) (strength + access) but also bumps
-    /// `proof_count` (independent corroborating evidence — the consolidation signal).
-    /// Default delegates to `reinforce` for stores without a `proof_count` column.
-    fn corroborate(&mut self, id: &str, delta: f32) -> Result<()> {
-        self.reinforce(id, delta)
+    /// Record a corroborating observation for `memory_id` from `source_id`: insert
+    /// `(quote, occurred_at)` into the evidence set (set-union — re-recording the same
+    /// `source_id` is a no-op) and refresh `proof_count` to the distinct-source count.
+    /// This is the consolidation signal: independent sources raise proof, one source
+    /// restating does not. Strength/access are handled separately by
+    /// [`reinforce`](VectorStore::reinforce). Default: no-op, for stores without an
+    /// evidence table (their `proof_count` stays at its insert-time value).
+    fn record_evidence(
+        &mut self,
+        _memory_id: &str,
+        _source_id: &str,
+        _quote: &str,
+        _occurred_at: i64,
+    ) -> Result<()> {
+        Ok(())
     }
 
     /// Add a directed `from_id --kind--> to_id` edge. Idempotent (duplicate edges

@@ -14,7 +14,7 @@ use std::sync::Arc;
 use memeora_core::{
     Candidate, EmbeddingProvider, Extractor, IngestParams, Memory, MemoryKind, PreparedCandidate,
     ProfileCache, ScoredMemory, SearchParams, SqliteStore, VectorStore, embed_candidates,
-    ingest_prepared, sanitize, search,
+    freshness, ingest_prepared, now_unix, sanitize, search,
 };
 use memeora_proto::{MemoryDto, PROTOCOL_VERSION, Request, Response};
 use tokio::sync::broadcast;
@@ -39,6 +39,7 @@ pub(crate) enum Prepared {
     Ingest {
         scope: String,
         candidates: Vec<PreparedCandidate>,
+        source: Option<String>,
     },
     Add {
         scope: String,
@@ -81,14 +82,22 @@ impl Preparer {
     pub(crate) fn prepare(&self, request: Request) -> memeora_core::Result<Prepared> {
         Ok(match request {
             Request::Hello { .. } => Prepared::Hello,
-            Request::Ingest { scope, text } => {
+            Request::Ingest {
+                scope,
+                text,
+                source,
+            } => {
                 // Enforce the privacy invariant at the engine boundary: strip
                 // <private>…</private> and redact secrets before extraction/embedding
                 // so every write surface (MCP/IPC/hook) inherits it.
                 let text = sanitize(&text);
                 let candidates = self.extractor.extract(&text)?;
                 let candidates = embed_candidates(self.embedder.as_ref(), candidates)?;
-                Prepared::Ingest { scope, candidates }
+                Prepared::Ingest {
+                    scope,
+                    candidates,
+                    source,
+                }
             }
             Request::Add {
                 scope,
@@ -243,14 +252,18 @@ impl Engine {
                     .collect(),
             },
 
-            Prepared::Ingest { scope, candidates } => {
+            Prepared::Ingest {
+                scope,
+                candidates,
+                source,
+            } => {
                 // One transaction for the whole batch: a mid-batch failure rolls back
                 // every candidate rather than leaving a partial write the client was
                 // told failed (which a retry would then double-reinforce).
                 let params = self.ingest_params.clone();
-                let outcome = self
-                    .store
-                    .transaction(|s| ingest_prepared(s, &scope, candidates, &params))?;
+                let outcome = self.store.transaction(|s| {
+                    ingest_prepared(s, &scope, source.as_deref(), candidates, &params)
+                })?;
                 self.profiles.invalidate(&scope);
                 self.emit(&scope, "ingested");
                 Response::Ingested {
@@ -268,7 +281,7 @@ impl Engine {
                 // separate writes) so an `add` is all-or-nothing too.
                 let params = self.ingest_params.clone();
                 let outcome = self.store.transaction(|s| {
-                    ingest_prepared(s, &scope, vec![(candidate, embedding)], &params)
+                    ingest_prepared(s, &scope, None, vec![(candidate, embedding)], &params)
                 })?;
                 self.profiles.invalidate(&scope);
                 self.emit(&scope, "added");
@@ -295,23 +308,34 @@ impl Engine {
                     ..self.search_params.clone()
                 };
                 let hits = search(&self.store, &scope, &query_embedding, &query, &params)?;
+                let now = now_unix();
                 Response::Memories {
-                    memories: hits.iter().map(scored_to_dto).collect(),
+                    memories: hits.iter().map(|h| scored_to_dto(h, now)).collect(),
                 }
             }
 
             Prepared::Context { scope } => {
                 let profile = self.profiles.get_or_build(&self.store, &scope)?;
+                let now = now_unix();
                 Response::Context {
-                    statics: profile.statics.iter().map(memory_to_dto).collect(),
-                    dynamics: profile.dynamics.iter().map(memory_to_dto).collect(),
+                    statics: profile
+                        .statics
+                        .iter()
+                        .map(|m| memory_to_dto(m, now))
+                        .collect(),
+                    dynamics: profile
+                        .dynamics
+                        .iter()
+                        .map(|m| memory_to_dto(m, now))
+                        .collect(),
                 }
             }
 
             Prepared::List { scope, limit } => {
                 let memories = self.store.list_latest(&scope, limit)?;
+                let now = now_unix();
                 Response::Memories {
-                    memories: memories.iter().map(memory_to_dto).collect(),
+                    memories: memories.iter().map(|m| memory_to_dto(m, now)).collect(),
                 }
             }
 
@@ -329,8 +353,9 @@ impl Engine {
     }
 }
 
-/// Project a stored memory onto the wire DTO (no relevance score).
-fn memory_to_dto(memory: &Memory) -> MemoryDto {
+/// Project a stored memory onto the wire DTO (no relevance score). `now` is the read
+/// clock used to derive the freshness/decay trend label.
+fn memory_to_dto(memory: &Memory, now: i64) -> MemoryDto {
     MemoryDto {
         id: memory.id.clone(),
         content: memory.content.clone(),
@@ -338,14 +363,15 @@ fn memory_to_dto(memory: &Memory) -> MemoryDto {
         strength: memory.strength,
         created_at: memory.created_at,
         score: None,
+        freshness: Some(freshness(memory, now).to_string()),
     }
 }
 
 /// Project a scored search hit onto the wire DTO (carrying the relevance score).
-fn scored_to_dto(scored: &ScoredMemory) -> MemoryDto {
+fn scored_to_dto(scored: &ScoredMemory, now: i64) -> MemoryDto {
     MemoryDto {
         score: Some(scored.score),
-        ..memory_to_dto(&scored.memory)
+        ..memory_to_dto(&scored.memory, now)
     }
 }
 
@@ -447,6 +473,7 @@ mod tests {
         let out = e.handle(Request::Ingest {
             scope: scope.into(),
             text: "I prefer dark mode. We use SQLite for storage.".into(),
+            source: None,
         });
         assert!(matches!(out, Response::Ingested { added: 2, .. }));
 

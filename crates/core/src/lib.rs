@@ -22,7 +22,7 @@ pub mod search;
 pub mod store;
 pub mod temporal;
 
-pub use dynamics::decayed_strength;
+pub use dynamics::{decayed_strength, freshness};
 pub use embed::{CachingEmbedder, EmbeddingProvider, EmbeddingSpace};
 pub use entity::extract_entities;
 pub use error::{Error, Result};

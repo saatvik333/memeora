@@ -470,26 +470,31 @@ impl VectorStore for SqliteStore {
         Ok(())
     }
 
-    fn corroborate(&mut self, id: &str, delta: f32) -> Result<()> {
-        // Like reinforce (capped potentiation + spaced stability) plus proof_count for
-        // the distinct corroborating statement.
-        self.conn.execute(
-            "UPDATE memories SET
-                strength = MIN(?1, strength + ?2),
-                proof_count = proof_count + 1,
-                stability = stability + CASE WHEN (?3 - last_accessed_at) >= ?4 THEN ?5 ELSE 0 END,
-                last_accessed_at = ?3,
-                access_count = access_count + 1
-             WHERE id = ?6",
-            params![
-                dynamics::STRENGTH_MAX as f64,
-                delta as f64,
-                now_unix(),
-                dynamics::SPACING_SECS,
-                dynamics::STABILITY_DELTA as f64,
-                id,
-            ],
+    fn record_evidence(
+        &mut self,
+        memory_id: &str,
+        source_id: &str,
+        quote: &str,
+        occurred_at: i64,
+    ) -> Result<()> {
+        // Two writes as a unit (nests in the daemon batch like `link_entities`): add the
+        // observation (set-union via the composite PK — a repeated source is ignored),
+        // then refresh proof_count to the distinct-source count. Recompute (not +1) is
+        // what makes one source restating idempotent. Assumes originating evidence was
+        // recorded at insert time, so the count never drops below the real source set.
+        let tx = self.conn.savepoint()?;
+        tx.execute(
+            "INSERT OR IGNORE INTO evidence (memory_id, source_id, quote, occurred_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![memory_id, source_id, quote, occurred_at],
         )?;
+        tx.execute(
+            "UPDATE memories SET proof_count =
+                (SELECT COUNT(DISTINCT source_id) FROM evidence WHERE memory_id = ?1)
+             WHERE id = ?1",
+            params![memory_id],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -1102,20 +1107,28 @@ mod tests {
     }
 
     #[test]
-    fn corroborate_bumps_proof_count_and_strength() {
+    fn record_evidence_counts_distinct_sources_only() {
         let mut s = SqliteStore::open_in_memory(2).unwrap();
         s.upsert(&mem("m1", "x", "t", vec![1.0, 0.0])).unwrap();
-        let before = s.get("m1").unwrap().unwrap();
-        assert_eq!((before.proof_count, before.access_count), (1, 0));
+        // Originating observation (recorded by the ingest insert path).
+        s.record_evidence("m1", "src-a", "x", 100).unwrap();
+        assert_eq!(s.get("m1").unwrap().unwrap().proof_count, 1);
 
-        s.corroborate("m1", 0.5).unwrap();
-        let after = s.get("m1").unwrap().unwrap();
+        // A distinct source corroborating raises the distinct-source count.
+        s.record_evidence("m1", "src-b", "x restated", 200).unwrap();
         assert_eq!(
-            after.proof_count, 2,
-            "distinct corroboration grows proof_count"
+            s.get("m1").unwrap().unwrap().proof_count,
+            2,
+            "a distinct source raises proof_count"
         );
-        assert_eq!(after.access_count, 1);
-        assert!(after.strength > before.strength);
+
+        // The same source again is a set-union no-op — one source can't inflate proof.
+        s.record_evidence("m1", "src-a", "x again", 300).unwrap();
+        assert_eq!(
+            s.get("m1").unwrap().unwrap().proof_count,
+            2,
+            "re-recording a known source does not inflate proof_count"
+        );
     }
 
     #[test]

@@ -96,9 +96,22 @@ impl Client {
 
     /// Ingest raw text; returns `(added, reinforced)` counts.
     pub fn ingest(&mut self, scope: &str, text: &str) -> io::Result<(usize, usize)> {
+        self.ingest_from(scope, text, None)
+    }
+
+    /// Ingest raw text attributed to `source` (an agent/session id), so repeated
+    /// corroboration from the same source can't inflate a memory's proof. Gate on the
+    /// `evidence` capability; pass `None` for the unattributed default.
+    pub fn ingest_from(
+        &mut self,
+        scope: &str,
+        text: &str,
+        source: Option<&str>,
+    ) -> io::Result<(usize, usize)> {
         match self.call(&Request::Ingest {
             scope: scope.to_string(),
             text: text.to_string(),
+            source: source.map(str::to_string),
         })? {
             Response::Ingested { added, reinforced } => Ok((added, reinforced)),
             other => Err(unexpected(other)),

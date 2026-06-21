@@ -127,7 +127,7 @@ pub fn ingest_candidates(
     params: &IngestParams,
 ) -> Result<IngestOutcome> {
     let prepared = embed_candidates(embedder, candidates)?;
-    ingest_prepared(store, container_tag, prepared, params)
+    ingest_prepared(store, container_tag, None, prepared, params)
 }
 
 /// Embed each candidate's content as a document, pairing it with its vector.
@@ -160,9 +160,19 @@ pub fn embed_candidates(
 ///
 /// The DB-only half of ingestion (no embedding), so it can run alone on the
 /// daemon's writer thread after [`embed_candidates`] has run elsewhere.
+///
+/// `source` identifies *who* is making these observations (an agent/session id), so
+/// repeated corroboration from one source can't inflate `proof_count` — only distinct
+/// sources raise it. When `None`, each statement's own content id stands in as the
+/// source, so distinct restatements still count as independent evidence while exact
+/// repeats (routed to reinforce) do not.
+// ponytail: per-statement content-id fallback when no source is threaded — anonymous
+// re-wordings still read as distinct evidence; thread a real `source` for true
+// per-source dedup (the surface adapters that know the session do this later).
 pub fn ingest_prepared(
     store: &mut dyn VectorStore,
     container_tag: &str,
+    source: Option<&str>,
     prepared: Vec<PreparedCandidate>,
     params: &IngestParams,
 ) -> Result<IngestOutcome> {
@@ -173,6 +183,13 @@ pub fn ingest_prepared(
         // Canonical entities for this content — linked on every insert/resurrect so
         // memories about the same thing can be related (graph channel / consolidation).
         let entities = crate::entity::extract_entities(&candidate.content);
+        // Evidence inputs for this observation, captured before `candidate` is moved.
+        // Default source = this statement's content id (`id`); occurred = valid-time or now.
+        let evidence_source = source.map(str::to_string).unwrap_or_else(|| id.clone());
+        let quote = candidate.content.clone();
+        let occurred_at = candidate
+            .occurred_start
+            .unwrap_or_else(crate::store::now_unix);
 
         // Exact re-ingest by content id, handled before the KNN heuristic (which can
         // miss the literal-same row).
@@ -192,6 +209,9 @@ pub fn ingest_prepared(
                 let memory = candidate.into_memory(id.clone(), container_tag, embedding);
                 store.upsert(&memory)?;
                 store.link_entities(&id, container_tag, &entities)?;
+                // `into_memory` reset proof_count to 1; recompute it from the evidence
+                // rows that survived the forget so prior corroboration isn't lost.
+                store.record_evidence(&id, &evidence_source, &quote, occurred_at)?;
                 outcome.added.push(id);
             }
             continue;
@@ -250,6 +270,7 @@ pub fn ingest_prepared(
             let memory = candidate.into_memory(id.clone(), container_tag, embedding);
             if store.supersede(&old, &memory)? {
                 store.link_entities(&id, container_tag, &entities)?;
+                store.record_evidence(&id, &evidence_source, &quote, occurred_at)?;
                 outcome.superseded.push(old);
                 outcome.added.push(id);
             } else {
@@ -257,15 +278,18 @@ pub fn ingest_prepared(
                 // dropping the statement.
                 store.upsert(&memory)?;
                 store.link_entities(&id, container_tag, &entities)?;
+                store.record_evidence(&id, &evidence_source, &quote, occurred_at)?;
                 outcome.added.push(id);
             }
             continue;
         }
 
         if let Some(dup) = duplicate_id {
-            // A distinct near-duplicate is independent corroboration, not mere
-            // repetition: bump proof_count alongside strength (consolidation).
-            store.corroborate(&dup, params.reinforce_delta)?;
+            // A distinct near-duplicate is independent corroboration: reinforce strength
+            // and record it as evidence. proof_count grows only if this source is new to
+            // the belief — recorded by `record_evidence`, not a blind counter bump.
+            store.reinforce(&dup, params.reinforce_delta)?;
+            store.record_evidence(&dup, &evidence_source, &quote, occurred_at)?;
             outcome.reinforced.push(dup);
             continue;
         }
@@ -273,6 +297,9 @@ pub fn ingest_prepared(
         let memory = candidate.into_memory(id.clone(), container_tag, embedding);
         store.upsert(&memory)?;
         store.link_entities(&id, container_tag, &entities)?;
+        // Record the originating observation so proof_count starts from a real source
+        // set (and a later corroboration adds to it rather than replacing it).
+        store.record_evidence(&id, &evidence_source, &quote, occurred_at)?;
         // Link the new memory to its moderately-similar neighbors.
         for target in &link_targets {
             store.add_edge(&id, target, EdgeKind::Extends)?;
@@ -614,7 +641,7 @@ mod tests {
         let bad = (cand("We use SQLite", MemoryKind::Fact), vec![1.0, 0.0]); // dim 2 ≠ 3
 
         let params = IngestParams::default();
-        let result = store.transaction(|s| ingest_prepared(s, tag, vec![good, bad], &params));
+        let result = store.transaction(|s| ingest_prepared(s, tag, None, vec![good, bad], &params));
 
         assert!(result.is_err(), "a wrong-dim candidate must fail the batch");
         assert_eq!(
@@ -724,6 +751,46 @@ mod tests {
             1,
             "exact re-ingest must not inflate proof_count"
         );
+    }
+
+    #[test]
+    fn source_threading_dedups_corroboration_by_source() {
+        // Two distinct restatements of one belief: from the SAME source they are one
+        // observation (proof_count stays 1, set-union); from DIFFERENT sources they are
+        // independent corroboration (proof_count 2). Same vector ⇒ the second near-dups
+        // the first ⇒ the corroborate path records evidence under the threaded source.
+        let embedder = MapEmbedder::new(&[
+            ("I use Postgres", vec![1.0, 0.0, 0.0]),
+            ("We run Postgres", vec![1.0, 0.0, 0.0]),
+        ]);
+        let p = IngestParams::default();
+        let run = |src_a: &str, src_b: &str| {
+            let mut store = SqliteStore::open_in_memory(3).unwrap();
+            let a = ingest_prepared(
+                &mut store,
+                "t",
+                Some(src_a),
+                embed_candidates(&embedder, vec![fact("I use Postgres")]).unwrap(),
+                &p,
+            )
+            .unwrap();
+            ingest_prepared(
+                &mut store,
+                "t",
+                Some(src_b),
+                embed_candidates(&embedder, vec![fact("We run Postgres")]).unwrap(),
+                &p,
+            )
+            .unwrap();
+            store.get(&a.added[0]).unwrap().unwrap().proof_count
+        };
+
+        assert_eq!(
+            run("agent-1", "agent-1"),
+            1,
+            "one source can't inflate proof"
+        );
+        assert_eq!(run("agent-1", "agent-2"), 2, "distinct sources corroborate");
     }
 
     fn fact(content: &str) -> Candidate {

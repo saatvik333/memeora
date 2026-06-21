@@ -28,6 +28,12 @@ pub const SPACING_SECS: i64 = 86_400;
 /// Stability gained per spaced reinforcement.
 pub const STABILITY_DELTA: f32 = 1.0;
 
+/// Decay ratio at/above which a memory still reads as well-retained ("stable").
+const FRESH_STABLE_RATIO: f32 = 0.7;
+/// Decay ratio at/above which a memory reads as fading but present ("weakening");
+/// below it, "stale".
+const FRESH_WEAK_RATIO: f32 = 0.25;
+
 const SECONDS_PER_DAY: f32 = 86_400.0;
 
 /// Effective strength of `m` at `now` (Unix seconds): Ebbinghaus decay of the stored
@@ -36,6 +42,37 @@ pub fn decayed_strength(m: &Memory, now: i64) -> f32 {
     let idle_days = (now - m.last_accessed_at).max(0) as f32 / SECONDS_PER_DAY;
     let stability = m.stability.max(0.001); // guard div-by-zero; higher ⇒ slower decay
     (m.strength * (-idle_days / stability).exp()).max(STRENGTH_FLOOR)
+}
+
+/// Coarse freshness/trend label for `m` at `now` (VISION "freshness trends"), derived
+/// purely from in-hand fields — no extra query:
+/// - `new` — just learned from a single source.
+/// - `strengthening` — corroborated by ≥2 sources and reinforced recently.
+/// - `stable` — strength has held up (little decay since last access).
+/// - `weakening` — noticeably decayed but still well above the floor.
+/// - `stale` — decayed toward the floor (long idle).
+///
+/// This reads decay (Ebbinghaus) × distinct-source proof together, which is enough to
+/// trend a belief at read time.
+// ponytail: in-hand signals only (decay ratio + proof_count + age). The fuller VISION
+// model compares recent-vs-older distinct-source density from `evidence.occurred_at`;
+// add that windowed query if a label needs to distinguish *when* corroboration landed.
+pub fn freshness(m: &Memory, now: i64) -> &'static str {
+    let recently_reinforced = (now - m.last_accessed_at) < SPACING_SECS;
+    if m.proof_count <= 1 && (now - m.created_at) < SPACING_SECS {
+        return "new";
+    }
+    if m.proof_count > 1 && recently_reinforced {
+        return "strengthening";
+    }
+    let ratio = decayed_strength(m, now) / m.strength.max(STRENGTH_FLOOR);
+    if ratio >= FRESH_STABLE_RATIO {
+        "stable"
+    } else if ratio >= FRESH_WEAK_RATIO {
+        "weakening"
+    } else {
+        "stale"
+    }
 }
 
 #[cfg(test)]
@@ -77,6 +114,42 @@ mod tests {
         assert!(
             decayed_strength(&mem(1.0, 10.0, idle), now)
                 > decayed_strength(&mem(1.0, 1.0, idle), now)
+        );
+    }
+
+    #[test]
+    fn freshness_buckets_classify_each_trend() {
+        let now = 1_000_000_000;
+        let day = 86_400;
+        // Builder: strength, stability, last_accessed, created, proof_count.
+        let m = |strength, stability, last, created, proof: u32| {
+            let mut m = mem(strength, stability, last);
+            m.created_at = created;
+            m.proof_count = proof;
+            m
+        };
+
+        // Just learned, one source.
+        assert_eq!(freshness(&m(1.0, 1.0, now, now, 1), now), "new");
+        // Corroborated and reinforced recently (created long ago ⇒ not "new").
+        assert_eq!(
+            freshness(&m(1.0, 1.0, now, now - day * 10, 2), now),
+            "strengthening"
+        );
+        // Old, idle a day but high stability ⇒ barely decayed.
+        assert_eq!(
+            freshness(&m(1.0, 10.0, now - day, now - day * 10, 2), now),
+            "stable"
+        );
+        // Idle a day, stability 1 ⇒ e^-1 ≈ 0.37 of strength left.
+        assert_eq!(
+            freshness(&m(1.0, 1.0, now - day, now - day * 10, 1), now),
+            "weakening"
+        );
+        // Idle a month ⇒ decayed to the floor.
+        assert_eq!(
+            freshness(&m(1.0, 1.0, now - day * 30, now - day * 60, 1), now),
+            "stale"
         );
     }
 }

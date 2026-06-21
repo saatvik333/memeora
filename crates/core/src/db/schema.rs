@@ -70,6 +70,21 @@ fn migrations() -> Migrations<'static> {
         );
         CREATE INDEX idx_memory_entities_entity ON memory_entities(entity_id);",
         ),
+        // Observation/evidence layer (P3): one row per (memory, distinct source) that
+        // corroborates the belief. `proof_count` on `memories` becomes a denormalized
+        // cache of `COUNT(DISTINCT source_id)` here (read on every recall), refreshed
+        // by `record_evidence`. The composite PK makes re-recording the same source a
+        // set-union no-op, so one source restating a belief can't inflate proof_count.
+        M::up(
+            "CREATE TABLE evidence (
+            memory_id   TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+            source_id   TEXT NOT NULL,
+            quote       TEXT,
+            occurred_at INTEGER,
+            PRIMARY KEY (memory_id, source_id)
+        );
+        CREATE INDEX idx_evidence_memory ON evidence(memory_id);",
+        ),
     ])
 }
 
