@@ -12,7 +12,8 @@ use std::path::{Path, PathBuf};
 
 use memeora_core::embed::fastembed::FastEmbedder;
 use memeora_core::{
-    EmbeddingProvider, Extractor, HeuristicExtractor, LlmConfig, LlmExtractor, SqliteStore,
+    CachingEmbedder, EmbeddingProvider, Extractor, HeuristicExtractor, LlmConfig, LlmExtractor,
+    SqliteStore,
 };
 use memeora_proto::{DEFAULT_SOCKET, PROTOCOL_VERSION};
 use tokio::sync::broadcast;
@@ -123,8 +124,9 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     }
 
     // Local, no-API-key embedder (downloads weights to the cache on first run, only
-    // when allowed by the consent check above).
-    let embedder = FastEmbedder::bge_small(Some(model_cache))?;
+    // when allowed by the consent check above), wrapped in a content-addressed cache
+    // so repeated text (the common case across turns) skips re-embedding.
+    let embedder = CachingEmbedder::new(FastEmbedder::bge_small(Some(model_cache))?);
     let dim = embedder.dim();
     let store = SqliteStore::open(&db_path, dim)?;
 

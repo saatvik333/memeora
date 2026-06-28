@@ -33,7 +33,7 @@ const PRIVATE_CLOSE: &str = "</private>";
 /// An unterminated `<private>` drops everything from the tag to end-of-input —
 /// failing **closed**, so a malformed fence can never leak the content it meant to
 /// hide.
-pub fn strip_private(text: &str) -> String {
+pub(crate) fn strip_private(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(open) = find_ci(rest, PRIVATE_OPEN) {

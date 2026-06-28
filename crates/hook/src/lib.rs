@@ -149,13 +149,18 @@ pub fn transcript_to_text(jsonl: &str, max_turns: usize) -> String {
     turns[start..].join("\n")
 }
 
+/// `message.content` (or top-level `content`) from a transcript entry, if present.
+fn message_content(value: &Value) -> Option<&Value> {
+    value
+        .get("message")
+        .and_then(|m| m.get("content"))
+        .or_else(|| value.get("content"))
+}
+
 /// Pull text from a transcript entry: `message.content` (or `content`) as a string
 /// or an array of `{type:"text", text: ...}` blocks (tool/thinking blocks skipped).
 pub fn extract_text(value: &Value) -> String {
-    let content = value
-        .get("message")
-        .and_then(|m| m.get("content"))
-        .or_else(|| value.get("content"));
+    let content = message_content(value);
     match content {
         Some(Value::String(s)) => s.clone(),
         Some(Value::Array(blocks)) => blocks
@@ -235,11 +240,7 @@ pub fn session_capture(jsonl: &str, max_turns: usize) -> String {
 /// `tool_use` blocks. Unknown tools are ignored, so arbitrary tool payloads — which
 /// can carry secrets or attacker-injected text — are never surfaced.
 fn collect_activity(value: &Value, files: &mut Vec<String>, commands: &mut Vec<String>) {
-    let content = value
-        .get("message")
-        .and_then(|m| m.get("content"))
-        .or_else(|| value.get("content"));
-    let Some(Value::Array(blocks)) = content else {
+    let Some(Value::Array(blocks)) = message_content(value) else {
         return;
     };
     for block in blocks {

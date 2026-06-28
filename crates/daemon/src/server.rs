@@ -74,14 +74,17 @@ fn spawn_writer(mut engine: Engine) -> SyncSender<Job> {
 /// calling thread. `engine` moves onto the dedicated writer thread; embedding and
 /// extraction run on the connection threads via a shared [`Preparer`].
 pub fn serve(engine: Engine, socket: &str) -> io::Result<()> {
+    let already_listening = || {
+        io::Error::new(
+            io::ErrorKind::AddrInUse,
+            format!("a memeora-daemon is already listening on {socket}"),
+        )
+    };
     // Sole-writer guard: if a daemon already answers on this socket, refuse to
     // start rather than overwrite it and end up with two writers on one DB.
     let live = Stream::connect(build_name(socket)?).is_ok();
     if live {
-        return Err(io::Error::new(
-            io::ErrorKind::AddrInUse,
-            format!("a memeora-daemon is already listening on {socket}"),
-        ));
+        return Err(already_listening());
     }
 
     let preparer = engine.preparer();
@@ -98,10 +101,7 @@ pub fn serve(engine: Engine, socket: &str) -> io::Result<()> {
             if e.kind() == io::ErrorKind::AddrInUse || e.kind() == io::ErrorKind::AlreadyExists =>
         {
             // A second process bound after our probe; it's the sole writer now.
-            return Err(io::Error::new(
-                io::ErrorKind::AddrInUse,
-                format!("a memeora-daemon is already listening on {socket}"),
-            ));
+            return Err(already_listening());
         }
         // The socket path exists from a previous (now dead) daemon run.
         // We confirmed above (probe returned Err) that no live daemon owns it,

@@ -36,10 +36,10 @@ capture_ack        = "{}"                    # JSON the capture event must print
 Field paths are dotted; numeric segments index arrays (`workspacePaths.0`). Scope
 resolution falls back to the process cwd; transcript/scope try each field in order.
 
-### Scaffold it
+### Start from a first-party descriptor
 
 ```sh
-memeora adapter new yourtool          # writes adapters/yourtool/{yourtool.toml,README.md}
+cp adapters/_descriptors/claude.toml adapters/yourtool.toml   # then edit for your host
 ```
 
 Edit the descriptor, then wire your harness's hooks to call:

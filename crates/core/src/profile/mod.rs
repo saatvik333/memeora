@@ -145,11 +145,6 @@ impl ProfileCache {
         self.lock().remove(container_tag);
     }
 
-    /// Drop all cached profiles.
-    pub fn clear(&self) {
-        self.lock().clear();
-    }
-
     /// Number of cached tags.
     pub fn len(&self) -> usize {
         self.lock().len()

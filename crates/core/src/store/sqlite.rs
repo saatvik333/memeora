@@ -35,21 +35,13 @@ impl SqliteStore {
     /// embedding dim matches `dim` but never writes it.
     pub fn open_readonly(path: impl AsRef<Path>, dim: usize) -> Result<Self> {
         let conn = db::open_reader(path)?;
-        let stored_dim: Option<String> = conn
-            .query_row(
-                "SELECT value FROM meta WHERE key = 'embedding_dim'",
-                [],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if let Some(s) = stored_dim {
-            let prev: usize = s.parse().unwrap_or(0);
-            if prev != dim {
-                return Err(Error::DimMismatch {
-                    expected: prev,
-                    got: dim,
-                });
-            }
+        if let Some(prev) = stored_dim(&conn)?
+            && prev != dim
+        {
+            return Err(Error::DimMismatch {
+                expected: prev,
+                got: dim,
+            });
         }
         Ok(SqliteStore { conn, dim })
     }
@@ -66,24 +58,15 @@ impl SqliteStore {
             "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
             [],
         )?;
-        let stored_dim: Option<String> = conn
-            .query_row(
-                "SELECT value FROM meta WHERE key = 'embedding_dim'",
-                [],
-                |r| r.get(0),
-            )
-            .optional()?;
-        match stored_dim {
-            Some(s) => {
-                let prev: usize = s.parse().unwrap_or(0);
-                if prev != dim {
-                    // Reusing DimMismatch: the store was built for `prev`, opened for `dim`.
-                    return Err(Error::DimMismatch {
-                        expected: prev,
-                        got: dim,
-                    });
-                }
+        match stored_dim(&conn)? {
+            Some(prev) if prev != dim => {
+                // Reusing DimMismatch: the store was built for `prev`, opened for `dim`.
+                return Err(Error::DimMismatch {
+                    expected: prev,
+                    got: dim,
+                });
             }
+            Some(_) => {}
             None => {
                 conn.execute(
                     "INSERT INTO meta (key, value) VALUES ('embedding_dim', ?1)",
@@ -216,6 +199,18 @@ fn fts5_match(query: &str) -> Option<String> {
         .map(|t| format!("\"{t}\""))
         .collect();
     (!tokens.is_empty()).then(|| tokens.join(" "))
+}
+
+/// The persisted embedding dim (`meta.embedding_dim`), or `None` before first init.
+fn stored_dim(conn: &Connection) -> Result<Option<usize>> {
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'embedding_dim'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(raw.map(|s| s.parse().unwrap_or(0)))
 }
 
 /// Serialize an f32 slice to the little-endian byte blob `vec0` expects.
@@ -598,28 +593,6 @@ impl VectorStore for SqliteStore {
         }
         tx.commit()?;
         Ok(())
-    }
-
-    fn shared_entity_memory_ids(
-        &self,
-        memory_id: &str,
-        limit: usize,
-    ) -> Result<Vec<(String, u32)>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT me2.memory_id, COUNT(*) AS shared
-             FROM memory_entities me1
-             JOIN memory_entities me2 ON me1.entity_id = me2.entity_id
-             JOIN memories m ON m.id = me2.memory_id
-             WHERE me1.memory_id = ?1 AND me2.memory_id != ?1 AND m.is_latest = 1
-             GROUP BY me2.memory_id
-             ORDER BY shared DESC, me2.memory_id
-             LIMIT ?2",
-        )?;
-        let rows = stmt.query_map(params![memory_id, limit as i64], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u32))
-        })?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
     }
 
     fn graph_search(
@@ -1087,23 +1060,24 @@ mod tests {
             .unwrap();
         s.link_entities("b", tag, &["sqlitestore".into()]).unwrap();
 
-        // "a" and "b" share one entity; "c" shares none.
-        assert_eq!(
-            s.shared_entity_memory_ids("a", 10).unwrap(),
-            vec![("b".to_string(), 1)]
-        );
-        assert!(s.shared_entity_memory_ids("c", 10).unwrap().is_empty());
+        // "a" and "b" share one entity; "c" shares none — graph recall surfaces "b".
+        let neighbors = |s: &SqliteStore, seed: &str| -> Vec<String> {
+            s.graph_search(tag, &[seed.to_string()], 10)
+                .unwrap()
+                .into_iter()
+                .map(|h| h.memory.id)
+                .collect()
+        };
+        assert_eq!(neighbors(&s, "a"), vec!["b".to_string()]);
+        assert!(neighbors(&s, "c").is_empty());
 
-        // Linking is idempotent — no duplicate rows, same shared result.
+        // Linking is idempotent — re-linking doesn't duplicate the neighbor.
         s.link_entities("b", tag, &["sqlitestore".into()]).unwrap();
-        assert_eq!(
-            s.shared_entity_memory_ids("a", 10).unwrap(),
-            vec![("b".to_string(), 1)]
-        );
+        assert_eq!(neighbors(&s, "a"), vec!["b".to_string()]);
 
-        // A forgotten memory drops out of the shared results (is_latest filter).
+        // A forgotten memory drops out (is_latest filter).
         s.forget("b").unwrap();
-        assert!(s.shared_entity_memory_ids("a", 10).unwrap().is_empty());
+        assert!(neighbors(&s, "a").is_empty());
     }
 
     #[test]

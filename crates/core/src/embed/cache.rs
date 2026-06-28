@@ -175,6 +175,12 @@ impl<E: EmbeddingProvider> EmbeddingProvider for CachingEmbedder<E> {
         self.lock().put(key, vec.clone());
         Ok(vec)
     }
+
+    // Forward the inner provider's locality so wrapping a remote provider can't be
+    // misreported as local and bypass the consent policy (matches the Box<dyn> impl).
+    fn is_local(&self) -> bool {
+        self.inner.is_local()
+    }
 }
 
 #[cfg(test)]

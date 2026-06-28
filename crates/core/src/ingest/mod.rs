@@ -269,18 +269,15 @@ pub fn ingest_prepared(
         if let Some(old) = supersede_target {
             let memory = candidate.into_memory(id.clone(), container_tag, embedding);
             if store.supersede(&old, &memory)? {
-                store.link_entities(&id, container_tag, &entities)?;
-                store.record_evidence(&id, &evidence_source, &quote, occurred_at)?;
                 outcome.superseded.push(old);
-                outcome.added.push(id);
             } else {
                 // Target vanished mid-batch: insert the memory we built rather than
                 // dropping the statement.
                 store.upsert(&memory)?;
-                store.link_entities(&id, container_tag, &entities)?;
-                store.record_evidence(&id, &evidence_source, &quote, occurred_at)?;
-                outcome.added.push(id);
             }
+            store.link_entities(&id, container_tag, &entities)?;
+            store.record_evidence(&id, &evidence_source, &quote, occurred_at)?;
+            outcome.added.push(id);
             continue;
         }
 
@@ -684,8 +681,13 @@ mod tests {
         assert_eq!(a.added.len(), 1);
         assert_eq!(b.added.len(), 1);
         assert_eq!(
-            store.shared_entity_memory_ids(&a.added[0], 10).unwrap(),
-            vec![(b.added[0].clone(), 1)],
+            store
+                .graph_search("t", &[a.added[0].clone()], 10)
+                .unwrap()
+                .into_iter()
+                .map(|h| h.memory.id)
+                .collect::<Vec<_>>(),
+            vec![b.added[0].clone()],
             "memories sharing the SqliteStore entity must resolve as related"
         );
     }

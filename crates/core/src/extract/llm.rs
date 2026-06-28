@@ -65,15 +65,10 @@ impl LlmConfig {
         })
     }
 
-    /// Whether the endpoint host is loopback/local.
-    pub fn endpoint_is_local(&self) -> bool {
-        host_is_local(&self.endpoint)
-    }
-
     /// Whether the consent policy permits this endpoint: local is always allowed; a
     /// remote endpoint only with explicit [`allow_remote`](LlmConfig::allow_remote).
     pub fn is_allowed(&self) -> bool {
-        self.endpoint_is_local() || self.allow_remote
+        host_is_local(&self.endpoint) || self.allow_remote
     }
 }
 
@@ -131,26 +126,19 @@ pub trait LlmTransport: Send + Sync {
     fn post_json(&self, url: &str, body: &str) -> Result<String>;
 }
 
-/// Minimal blocking HTTP/1.1 transport for a loopback OpenAI-compatible server.
-pub struct HttpTransport {
-    timeout: Duration,
-}
+/// Read/write timeout for the loopback transport (no setter — loopback is fast or absent).
+const TRANSPORT_TIMEOUT: Duration = Duration::from_secs(30);
 
-impl Default for HttpTransport {
-    fn default() -> Self {
-        HttpTransport {
-            timeout: Duration::from_secs(30),
-        }
-    }
-}
+/// Minimal blocking HTTP/1.1 transport for a loopback OpenAI-compatible server.
+pub struct HttpTransport;
 
 impl LlmTransport for HttpTransport {
     fn post_json(&self, url: &str, body: &str) -> Result<String> {
         let (host, port, path) = split_url(url)?;
         let mut stream = TcpStream::connect((host.as_str(), port))
             .map_err(|e| Error::Llm(format!("connect {host}:{port}: {e}")))?;
-        stream.set_read_timeout(Some(self.timeout)).ok();
-        stream.set_write_timeout(Some(self.timeout)).ok();
+        stream.set_read_timeout(Some(TRANSPORT_TIMEOUT)).ok();
+        stream.set_write_timeout(Some(TRANSPORT_TIMEOUT)).ok();
         let request = format!(
             "POST {path} HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Type: application/json\r\n\
              Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -202,7 +190,7 @@ pub struct LlmExtractor {
 impl LlmExtractor {
     /// Build with the default loopback HTTP transport.
     pub fn new(config: LlmConfig) -> Self {
-        LlmExtractor::with_transport(config, Box::new(HttpTransport::default()))
+        LlmExtractor::with_transport(config, Box::new(HttpTransport))
     }
 
     /// Build with a custom transport (used in tests, or to support TLS/remote later).

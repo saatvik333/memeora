@@ -38,7 +38,7 @@ builds a knowledge graph, and recalls the right context at the right time. It's 
 > - **Ecosystem:** the IPC protocol is **versioned with a capability handshake**
 >   ([`docs/PROTOCOL.md`](docs/PROTOCOL.md)); command-hook hosts are **data-driven host
 >   descriptors** ([`adapters/_descriptors/`](adapters/_descriptors/)) so adding a harness is
->   a TOML file, not Rust — scaffold one with `memeora adapter new`, validate it with the
+>   a TOML file, not Rust — copy a first-party descriptor as a starting point, validate it with the
 >   **conformance kit** (`crates/hook/tests/`). Client SDKs ship for **Rust** (`memeora-client`)
 >   and **TypeScript** ([`@memeora/client`](sdk/ts/)). See [`docs/ADAPTERS.md`](docs/ADAPTERS.md).
 > - **Release:** [`dist`](https://opensource.axo.dev/cargo-dist/) cross-compiles all four
@@ -135,8 +135,8 @@ Toolchain is pinned in `rust-toolchain.toml` (Rust 1.95, edition 2024).
 
 ## Contributing
 See [`CONTRIBUTING.md`](CONTRIBUTING.md). Adding support for a new harness is designed to be easy —
-often just a host-descriptor file: see [`docs/ADAPTERS.md`](docs/ADAPTERS.md) and run
-`memeora adapter new <harness>`.
+often just a host-descriptor file: see [`docs/ADAPTERS.md`](docs/ADAPTERS.md). Start by copying a
+first-party descriptor from [`adapters/_descriptors/`](adapters/_descriptors/).
 
 ## License
 Dual-licensed under [MIT](LICENSE-MIT) OR [Apache-2.0](LICENSE-APACHE).

@@ -108,14 +108,6 @@ impl Default for HeuristicExtractor {
 }
 
 impl HeuristicExtractor {
-    /// Build with explicit thresholds.
-    pub fn new(min_confidence: f32, min_words: usize) -> Self {
-        HeuristicExtractor {
-            min_confidence,
-            min_words,
-        }
-    }
-
     /// Classify a single statement, or `None` if it carries no memory signal.
     fn classify(&self, sentence: &str) -> Option<Candidate> {
         let lower = sentence.to_lowercase();
@@ -281,16 +273,6 @@ mod tests {
     fn deduplicates_within_batch() {
         let c = extract("I prefer dark mode\nI prefer dark mode");
         assert_eq!(c.len(), 1);
-    }
-
-    #[test]
-    fn confidence_threshold_filters() {
-        // Raise the bar above the fact/preference score (0.7) but below save (0.95).
-        let strict = HeuristicExtractor::new(0.9, 3);
-        let facts = strict.extract("I work at Stripe").unwrap();
-        assert!(facts.is_empty());
-        let saved = strict.extract("Remember that I work at Stripe").unwrap();
-        assert_eq!(saved.len(), 1);
     }
 
     #[test]

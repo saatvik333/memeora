@@ -217,6 +217,7 @@ impl Engine {
 
     /// Handle one request end-to-end (prepare + apply). Convenience for callers
     /// that don't split the work across threads (tests, non-daemon embedders).
+    #[cfg(test)]
     pub fn handle(&mut self, request: Request) -> Response {
         match self.preparer().prepare(request) {
             Ok(prepared) => self.handle_prepared(prepared),

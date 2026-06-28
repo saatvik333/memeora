@@ -310,17 +310,6 @@ pub trait VectorStore {
         Ok(())
     }
 
-    /// Latest memories in the same scope sharing ≥1 canonical entity with
-    /// `memory_id`, each with its shared-entity count, most-shared first. Feeds the
-    /// graph recall channel. Default: empty.
-    fn shared_entity_memory_ids(
-        &self,
-        _memory_id: &str,
-        _limit: usize,
-    ) -> Result<Vec<(String, u32)>> {
-        Ok(Vec::new())
-    }
-
     /// Graph recall channel: latest memories in `container_tag` that share canonical
     /// entities with any of `seed_ids` (seeds excluded), ranked by a bounded activation
     /// score — a saturating shared-entity term plus a bonus when the memory is also

@@ -19,11 +19,6 @@ use sha2::{Digest, Sha256};
 /// Conventional manifest filename memeora reads/writes inside a model directory.
 pub const MANIFEST_NAME: &str = "SHA256SUMS";
 
-/// Hex-encoded SHA-256 of `bytes` (the full 32-byte digest → 64 hex chars).
-pub fn sha256_hex(bytes: &[u8]) -> String {
-    hex(&Sha256::digest(bytes))
-}
-
 /// Streaming SHA-256 of a file, hashed in chunks so a large model file is never
 /// loaded into memory all at once.
 pub fn sha256_file(path: &Path) -> io::Result<String> {
@@ -236,19 +231,6 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
-    }
-
-    #[test]
-    fn sha256_matches_known_vectors() {
-        // NIST/RFC test vectors for SHA-256.
-        assert_eq!(
-            sha256_hex(b""),
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        );
-        assert_eq!(
-            sha256_hex(b"abc"),
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-        );
     }
 
     #[test]
