@@ -110,7 +110,9 @@ impl Default for HeuristicExtractor {
 impl HeuristicExtractor {
     /// Classify a single statement, or `None` if it carries no memory signal.
     fn classify(&self, sentence: &str) -> Option<Candidate> {
-        let lower = sentence.to_lowercase();
+        // Normalize the curly apostrophe U+2019 (iOS/macOS/Word autocorrect) to ASCII
+        // so "i don’t like" matches the straight-apostrophe markers.
+        let lower = sentence.to_lowercase().replace('\u{2019}', "'");
         let contains = |markers: &[&str]| markers.iter().any(|m| lower.contains(m));
 
         // Order matters: an explicit "remember" wins; a stated preference beats a
@@ -128,9 +130,10 @@ impl HeuristicExtractor {
         };
 
         // Record when the statement says the event occurred (valid-time), if it
-        // carries a temporal cue — distinct from when it was learned.
+        // carries a temporal cue — distinct from when it was learned. Parse the same
+        // normalized text the markers matched (temporal cues are ASCII too).
         let (occurred_start, occurred_end) =
-            match crate::temporal::parse(sentence, crate::store::now_unix()) {
+            match crate::temporal::parse(&lower, crate::store::now_unix()) {
                 Some((start, end)) => (Some(start), end),
                 None => (None, None),
             };
@@ -223,6 +226,16 @@ mod tests {
         let c = extract("I prefer dark mode in my editor");
         assert_eq!(c.len(), 1);
         assert_eq!(c[0].kind, MemoryKind::Preference);
+    }
+
+    #[test]
+    fn detects_preference_with_curly_apostrophe() {
+        // U+2019 (smart-quote autocorrect) must match the straight-apostrophe marker.
+        let c = extract("I don\u{2019}t like verbose logs");
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].kind, MemoryKind::Preference);
+        // The stored content keeps the original text, unnormalized.
+        assert_eq!(c[0].content, "I don\u{2019}t like verbose logs");
     }
 
     #[test]

@@ -7,20 +7,24 @@
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use crate::Result;
 use crate::embed::{EmbeddingProvider, EmbeddingSpace};
 
-/// Default entry cap. At ~1.5 KB per 384-d vector this bounds the cache to a few
-/// tens of MB — enough to shield hot repeats without growing without limit.
+/// Default entry cap. Each entry holds a ~1.5 KB 384-d vector (~75 MB at
+/// capacity) plus one shared copy of its key text (`Arc<str>`, held by both the
+/// map and the eviction queue) — so actual memory also scales with the length of
+/// the cached content, not just the entry count. Short queries are negligible;
+/// long document texts dominate their own entries.
 pub const DEFAULT_CAPACITY: usize = 50_000;
 
 /// Bounded, insertion-ordered (FIFO-evicted) content cache.
 struct Cache {
-    map: HashMap<String, Vec<f32>>,
-    /// Keys in insertion order; the front is evicted first when over capacity.
-    order: VecDeque<String>,
+    map: HashMap<Arc<str>, Vec<f32>>,
+    /// Keys in insertion order (sharing the map's key allocations); the front is
+    /// evicted first when over capacity.
+    order: VecDeque<Arc<str>>,
     capacity: usize,
 }
 
@@ -38,7 +42,7 @@ impl Cache {
     }
 
     fn put(&mut self, key: String, value: Vec<f32>) {
-        if let Some(slot) = self.map.get_mut(&key) {
+        if let Some(slot) = self.map.get_mut(key.as_str()) {
             *slot = value; // refresh in place; keep its existing order position
             return;
         }
@@ -46,12 +50,13 @@ impl Cache {
             // Evict oldest-inserted until there is room for the new entry.
             match self.order.pop_front() {
                 Some(old) => {
-                    self.map.remove(&old);
+                    self.map.remove(&*old);
                 }
                 None => break,
             }
         }
-        self.order.push_back(key.clone());
+        let key: Arc<str> = key.into();
+        self.order.push_back(Arc::clone(&key));
         self.map.insert(key, value);
     }
 }
@@ -123,18 +128,28 @@ impl<E: EmbeddingProvider> EmbeddingProvider for CachingEmbedder<E> {
 
     fn embed_documents(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
         let mut results: Vec<Option<Vec<f32>>> = vec![None; texts.len()];
+        // Misses are deduplicated within the batch: each unique text is forwarded
+        // to the inner provider once, then fanned back out to every position in
+        // `texts` that asked for it (`miss_slots[j]` lists those positions).
         let mut miss_texts: Vec<&str> = Vec::new();
-        let mut miss_indices: Vec<usize> = Vec::new();
+        let mut miss_slots: Vec<Vec<usize>> = Vec::new();
+        let mut seen: HashMap<&str, usize> = HashMap::new();
 
         {
             let cache = self.lock();
             for (i, &text) in texts.iter().enumerate() {
                 match cache.get(&doc_key(text)) {
                     Some(vec) => results[i] = Some(vec),
-                    None => {
-                        miss_texts.push(text);
-                        miss_indices.push(i);
-                    }
+                    None => match seen.entry(text) {
+                        std::collections::hash_map::Entry::Occupied(e) => {
+                            miss_slots[*e.get()].push(i)
+                        }
+                        std::collections::hash_map::Entry::Vacant(e) => {
+                            e.insert(miss_texts.len());
+                            miss_texts.push(text);
+                            miss_slots.push(vec![i]);
+                        }
+                    },
                 }
             }
         }
@@ -150,9 +165,10 @@ impl<E: EmbeddingProvider> EmbeddingProvider for CachingEmbedder<E> {
             }
             let mut cache = self.lock();
             for (j, vec) in embedded.into_iter().enumerate() {
-                let original = miss_indices[j];
-                cache.put(doc_key(miss_texts[j]), vec.clone());
-                results[original] = Some(vec);
+                for &i in &miss_slots[j] {
+                    results[i] = Some(vec.clone());
+                }
+                cache.put(doc_key(miss_texts[j]), vec);
             }
         }
 
@@ -272,6 +288,20 @@ mod tests {
         assert_eq!(out.len(), 2);
         assert_eq!(cache.len(), 2);
         assert_eq!(cache.into_inner().calls(), 2);
+    }
+
+    #[test]
+    fn duplicates_within_a_batch_are_embedded_once() {
+        let cache = CachingEmbedder::new(CountingEmbedder::new());
+        let out = cache.embed_documents(&["dup", "dup", "solo"]).unwrap();
+        // Every duplicate position is filled with the shared result.
+        assert_eq!(out[0], out[1]);
+        assert_eq!(cache.len(), 2);
+        assert_eq!(
+            cache.into_inner().calls(),
+            2,
+            "a text repeated within one batch must reach the inner provider once"
+        );
     }
 
     #[test]

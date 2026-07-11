@@ -10,8 +10,10 @@ authors.workspace = true
 
 [features]
 default = []
-# Local ONNX embeddings via fastembed. Opt-in here so `core`'s unit tests stay
-# fast and fully offline (no ONNX Runtime download); the daemon/cli enable it.
+# Local ONNX embeddings via fastembed. Opt-in here so a `-p memeora-core` build/test
+# stays fast (no ONNX stack to compile); the daemon/cli enable it, so any workspace-wide
+# build unifies it ON for core too. Tests stay offline either way: the model-downloading
+# tests are `#[ignore]`d, feature or not.
 fastembed = ["dep:fastembed"]
 
 [dependencies]

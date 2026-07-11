@@ -222,12 +222,36 @@ where
     blocking_with_timeout(f, CALL_TIMEOUT).await
 }
 
+/// Cap on concurrently-running daemon calls (see [`CALL_PERMITS`]).
+const MAX_INFLIGHT_CALLS: usize = 16;
+
+/// Bounds the threads a wedged daemon can leak. The sync client has no read
+/// deadline and tokio cannot cancel a blocking task, so a timed-out call's thread
+/// keeps running until the daemon call actually returns. Each call holds a permit
+/// *inside* the blocking closure — released when the thread truly finishes, not at
+/// timeout — so at most [`MAX_INFLIGHT_CALLS`] threads can be stuck at once; further
+/// calls then fail fast at the timeout instead of draining tokio's blocking pool
+/// (default 512) and starving unrelated work.
+static CALL_PERMITS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(MAX_INFLIGHT_CALLS);
+
 async fn blocking_with_timeout<T, F>(f: F, timeout: Duration) -> Result<T, ErrorData>
 where
     F: FnOnce() -> std::io::Result<T> + Send + 'static,
     T: Send + 'static,
 {
-    tokio::time::timeout(timeout, tokio::task::spawn_blocking(f))
+    let call = async {
+        let permit = CALL_PERMITS
+            .acquire()
+            .await
+            .expect("CALL_PERMITS is never closed");
+        tokio::task::spawn_blocking(move || {
+            let out = f();
+            drop(permit); // the thread is done — only now is the slot free again
+            out
+        })
+        .await
+    };
+    tokio::time::timeout(timeout, call)
         .await
         .map_err(|_| {
             ErrorData::internal_error(
@@ -308,5 +332,32 @@ mod tests {
         .await
         .unwrap_err();
         assert!(format!("{err:?}").contains("timed out"));
+    }
+
+    #[tokio::test]
+    async fn timed_out_call_releases_its_permit_when_the_thread_finishes() {
+        // A timed-out call keeps its blocking thread (and permit) only until the
+        // underlying call returns — the leak is bounded, not permanent.
+        let _ = blocking_with_timeout(
+            || {
+                std::thread::sleep(Duration::from_millis(30));
+                Ok::<(), std::io::Error>(())
+            },
+            Duration::from_millis(1),
+        )
+        .await;
+        // Fast calls still succeed while the abandoned thread runs (permits remain).
+        blocking_with_timeout(|| Ok::<(), std::io::Error>(()), Duration::from_secs(5))
+            .await
+            .unwrap();
+        // Once the abandoned thread finishes, all permits are back (poll: other
+        // tests in this process may briefly hold permits too).
+        for _ in 0..200 {
+            if CALL_PERMITS.available_permits() == MAX_INFLIGHT_CALLS {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("permit was never released after the blocking call finished");
     }
 }

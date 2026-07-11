@@ -1,0 +1,11 @@
+{
+  "host": "codex",
+  "event": "stop",
+  "payload": { "cwd": "/w/repo", "transcript_path": "/w/repo/.codex/sessions/t.jsonl" },
+  "expect": {
+    "transcript_path": "/w/repo/.codex/sessions/t.jsonl",
+    "transcript_jsonl": "{\"message\":{\"role\":\"user\",\"content\":\"wire the config loader\"}}\n{\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"done\"},{\"type\":\"tool_use\",\"name\":\"Write\",\"input\":{\"file_path\":\"src/config.rs\"}},{\"type\":\"tool_use\",\"name\":\"Bash\",\"input\":{\"command\":\"cargo check --token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789\"}}]}}",
+    "captured_contains": ["edited files src/config.rs", "ran command cargo check", "[REDACTED]", "user: wire the config loader"],
+    "captured_excludes": ["ghp_ABCDEF", "tool_use"]
+  }
+}

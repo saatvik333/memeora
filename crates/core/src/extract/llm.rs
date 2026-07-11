@@ -140,8 +140,9 @@ impl LlmTransport for HttpTransport {
         stream.set_read_timeout(Some(TRANSPORT_TIMEOUT)).ok();
         stream.set_write_timeout(Some(TRANSPORT_TIMEOUT)).ok();
         let request = format!(
-            "POST {path} HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Type: application/json\r\n\
+            "POST {path} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\n\
              Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            host_header(&host, port),
             body.len()
         );
         stream
@@ -156,6 +157,17 @@ impl LlmTransport for HttpTransport {
         raw.split_once("\r\n\r\n")
             .map(|(_, body)| body.to_string())
             .ok_or_else(|| Error::Llm("malformed HTTP response (no header/body split)".into()))
+    }
+}
+
+/// `Host` header value for `host:port`. [`split_host_port`] strips the `[...]` from
+/// an IPv6 literal for `TcpStream::connect`, but RFC 7230 §5.4 (via RFC 3986) requires
+/// the brackets back in the header — `Host: [::1]:11434`, never `Host: ::1:11434`.
+fn host_header(host: &str, port: u16) -> String {
+    if host.contains(':') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
     }
 }
 
@@ -269,13 +281,19 @@ struct RawCandidate {
 }
 
 /// Parse the model's JSON-array output into self-repaired candidates. Returns an
-/// empty vec (→ heuristic fallback) if the output isn't the expected JSON array.
+/// empty vec (→ heuristic fallback) if the output isn't a JSON array at all; a
+/// malformed *element* (e.g. `"kind": null`) is skipped individually, so one bad
+/// candidate never discards the rest of the batch.
 fn parse_candidates(content: &str) -> Vec<Candidate> {
     let cleaned = strip_code_fences(content);
-    match serde_json::from_str::<Vec<RawCandidate>>(cleaned) {
-        Ok(items) => items.into_iter().filter_map(repair_candidate).collect(),
-        Err(_) => Vec::new(),
-    }
+    let Ok(items) = serde_json::from_str::<Vec<serde_json::Value>>(cleaned) else {
+        return Vec::new();
+    };
+    items
+        .into_iter()
+        .filter_map(|v| serde_json::from_value::<RawCandidate>(v).ok())
+        .filter_map(repair_candidate)
+        .collect()
 }
 
 /// Graph self-repair for one proposed candidate: trim, drop-if-empty, coerce kind to
@@ -296,11 +314,15 @@ fn repair_candidate(raw: RawCandidate) -> Option<Candidate> {
     })
 }
 
-/// Strip a leading ```json / ``` fence and trailing ``` the model may wrap JSON in.
+/// Strip a leading ``` fence — with an optional language tag in any casing (`json`,
+/// `JSON`, …) — and a trailing ``` the model may wrap JSON in. JSON itself starts
+/// with `[`/`{`, so trimming leading ASCII letters can never eat the payload.
 fn strip_code_fences(s: &str) -> &str {
     let mut t = s.trim();
-    if let Some(rest) = t.strip_prefix("```json").or_else(|| t.strip_prefix("```")) {
-        t = rest.trim();
+    if let Some(rest) = t.strip_prefix("```") {
+        t = rest
+            .trim_start_matches(|c: char| c.is_ascii_alphabetic())
+            .trim();
     }
     if let Some(rest) = t.strip_suffix("```") {
         t = rest.trim();
@@ -376,6 +398,35 @@ mod tests {
             MemoryKind::Fact,
             "invalid kind coerced to fact"
         );
+    }
+
+    #[test]
+    fn malformed_element_does_not_discard_batch() {
+        // `kind: null` fails RawCandidate deserialization (serde(default) only covers
+        // an ABSENT field) — only that element is skipped, not the whole batch.
+        let content = "[{\"content\":\"User prefers Rust\",\"kind\":\"preference\"},\
+                       {\"content\":\"Deploys nightly\",\"kind\":null}]";
+        let cands = parse_candidates(content);
+        assert_eq!(cands.len(), 1, "good candidate survives the bad element");
+        assert_eq!(cands[0].content, "User prefers Rust");
+        assert_eq!(cands[0].kind, MemoryKind::Preference);
+    }
+
+    #[test]
+    fn strips_fences_regardless_of_language_tag_casing() {
+        assert_eq!(strip_code_fences("```json\n[1]\n```"), "[1]");
+        assert_eq!(strip_code_fences("```JSON\n[1]\n```"), "[1]");
+        assert_eq!(strip_code_fences("```Json\n[1]\n```"), "[1]");
+        assert_eq!(strip_code_fences("```\n[1]\n```"), "[1]");
+        assert_eq!(strip_code_fences("[1]"), "[1]");
+    }
+
+    #[test]
+    fn host_header_brackets_ipv6_literals() {
+        // RFC 7230: an IPv6 literal must keep its brackets in the Host header.
+        assert_eq!(host_header("::1", 11434), "[::1]:11434");
+        assert_eq!(host_header("localhost", 11434), "localhost:11434");
+        assert_eq!(host_header("127.0.0.1", 80), "127.0.0.1:80");
     }
 
     #[test]

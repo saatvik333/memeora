@@ -299,6 +299,32 @@ Rust). *CI:* a new `ts` job (bun) builds/type-checks/tests sdk/ts + dashboard +
 opencode; `scripts/check.sh` runs the same locally. Docs corrected: embedding
 serializes on one ONNX session (only DB-free framing/extraction is parallel).
 
+**Third hardening pass (every-line sector review, 2026-07: 28 confirmed findings, adversarially verified).**
+*Correctness:* re-ingesting **superseded** content no longer resurrects it as a second
+`is_latest` head — the resurrect branch now distinguishes forgotten (no active successor
+in the version chain → resurrect, lineage preserved) from superseded (record evidence on
+the historical row); `SqliteStore::transaction` catches an unwind out of the closure and
+rolls back before resuming it, so a panicking batch can't leave the writer-actor's
+connection mid-`BEGIN IMMEDIATE` (a permanent write-zombie); the temporal scanner walks
+`char_indices` (non-ASCII text used to panic extraction); the LLM extractor parses
+candidates element-wise (one malformed item no longer discards the batch), strips code
+fences case-insensitively, and brackets IPv6 `Host` headers; the heuristic extractor
+normalizes U+2019 apostrophes. *Recall/limits:* `graph()` caps the edge query in SQL (a
+CTE of the capped node set) instead of materializing every container edge;
+`CachingEmbedder` dedups repeated texts within a batch and shares key text via `Arc<str>`.
+*Resilience:* the dashboard's read path recovers a poisoned store lock; a failed model
+integrity check now refuses to load instead of warning; the MCP server caps in-flight
+daemon calls with a semaphore released by the blocking thread itself (a wedged daemon
+leaks ≤16 threads, not the whole blocking pool); the hook's descriptor errors degrade to
+best-effort no-ops. *Privacy:* auth-scheme redaction requires a token-shaped RHS (prose
+like "basic understanding" survives; real credentials still redact) and the `auth`
+sensitive-key matches whole segments (`author=` survives). *Contract:* TS `MemoryDto`
+gained `freshness`; `ingest`/`recall` accept `source`/`max_tokens`; the parity test now
+pins the full Rust `capability::ALL` list by parsing it. *Dashboard:* stale-response
+guards on graph/search loads; "not current" replaces the wrong "forgotten" label for
+superseded versions. *Deps:* `crossbeam-epoch` bumped past RUSTSEC-2026-0204. (Deferred,
+marked in code: incremental hook transcript reads — needs a hook state dir first.)
+
 *(CI from day one, in parallel with step 1: `fmt`/`clippy`/`test`/`cargo-deny` workflow, plus a `ts` (bun) job; `rust-toolchain.toml`, committed `Cargo.lock` + `bun.lock`s.)*
 
 ## Critical files (representative)

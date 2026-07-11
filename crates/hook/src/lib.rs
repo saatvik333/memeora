@@ -124,6 +124,14 @@ pub fn format_context(statics: &[MemoryDto], dynamics: &[MemoryDto]) -> Option<S
 
 /// Extract the last `max_turns` user/assistant turns from a transcript JSONL into
 /// compact `role: text` lines. Defensive: unknown lines/shapes are skipped.
+///
+/// ponytail: the whole capture pipeline (this, `extract_text`, `collect_activity`)
+/// understands only Claude's Anthropic-Messages JSONL shape (`message.role` /
+/// `message.content` blocks, tool names Edit/Write/Bash). Codex's descriptor claims
+/// the same shape (see `adapters/_descriptors/codex.toml` and the codex conformance
+/// fixture); a host whose transcripts nest differently gets a graceful empty capture
+/// (pinned by `fixtures/antigravity/capture-unknown-shape.json`), never a crash.
+/// Grow per-host transcript schemas only when a real host actually diverges.
 pub fn transcript_to_text(jsonl: &str, max_turns: usize) -> String {
     let mut turns = Vec::new();
     for line in jsonl.lines() {

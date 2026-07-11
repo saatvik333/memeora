@@ -200,19 +200,38 @@ pub fn ingest_prepared(
                 store.reinforce(&id, params.reinforce_delta)?;
                 outcome.reinforced.push(id);
             } else {
-                // The content was forgotten (`is_latest = 0`, vec row removed).
-                // Re-stating it must *resurrect* it, not reinforce an invisible row:
-                // `upsert` restores `is_latest = 1` and re-inserts the vec + FTS rows
-                // (and preserves existing graph edges). Resurrect this exact id rather
-                // than falling through to the KNN path, which could reinforce a
-                // *different* neighbor instead of bringing this content back.
-                let memory = candidate.into_memory(id.clone(), container_tag, embedding);
-                store.upsert(&memory)?;
-                store.link_entities(&id, container_tag, &entities)?;
-                // `into_memory` reset proof_count to 1; recompute it from the evidence
-                // rows that survived the forget so prior corroboration isn't lost.
-                store.record_evidence(&id, &evidence_source, &quote, occurred_at)?;
-                outcome.added.push(id);
+                // The content was retired (`is_latest = 0`) — but plain forgetting and
+                // supersession look identical at that level, and only the former may
+                // resurrect. If this row's version chain has an active successor,
+                // restating the old belief is corroborating history, not a revert:
+                // resurrecting would put a second `is_latest` head on the chain,
+                // returning both the retracted belief and its correction from recall.
+                let root = existing.root_id.clone().unwrap_or_else(|| id.clone());
+                let superseded = store
+                    .history(&root)?
+                    .iter()
+                    .any(|m| m.is_latest && m.id != id);
+                if superseded {
+                    store.record_evidence(&id, &evidence_source, &quote, occurred_at)?;
+                    outcome.reinforced.push(id);
+                } else {
+                    // Truly forgotten: re-stating it must *resurrect* it, not reinforce
+                    // an invisible row: `upsert` restores `is_latest = 1` and re-inserts
+                    // the vec + FTS rows (and preserves existing graph edges). Resurrect
+                    // this exact id rather than falling through to the KNN path, which
+                    // could reinforce a *different* neighbor instead of bringing this
+                    // content back — and keep its original chain position rather than
+                    // resetting lineage.
+                    let mut memory = candidate.into_memory(id.clone(), container_tag, embedding);
+                    memory.parent_id = existing.parent_id.clone();
+                    memory.root_id = existing.root_id.clone();
+                    store.upsert(&memory)?;
+                    store.link_entities(&id, container_tag, &entities)?;
+                    // `into_memory` reset proof_count to 1; recompute it from the evidence
+                    // rows that survived the forget so prior corroboration isn't lost.
+                    store.record_evidence(&id, &evidence_source, &quote, occurred_at)?;
+                    outcome.added.push(id);
+                }
             }
             continue;
         }
@@ -842,6 +861,77 @@ mod tests {
             (1, EdgeKind::Updates, a.added[0].as_str())
         );
         assert_eq!(store.history(&a.added[0]).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn reingesting_superseded_content_does_not_resurrect_it() {
+        // Supersession retires the old belief; restating the old content afterwards
+        // is corroborating history, not a revert — it must not put a second
+        // `is_latest` head on the chain (recall would then return the retracted
+        // belief *and* its correction as both current).
+        let correction = "Actually I no longer use MySQL, switching to Postgres";
+        let embedder = MapEmbedder::new(&[
+            ("I use MySQL", vec![1.0, 0.0, 0.0]),
+            (correction, vec![0.9, 0.4, 0.0]),
+        ]);
+        let mut store = SqliteStore::open_in_memory(3).unwrap();
+        let tag = "t";
+        let p = IngestParams::default();
+
+        let a =
+            ingest_candidates(&mut store, &embedder, tag, vec![fact("I use MySQL")], &p).unwrap();
+        let b = ingest_candidates(&mut store, &embedder, tag, vec![fact(correction)], &p).unwrap();
+        assert_eq!(b.superseded, a.added);
+
+        // Restate the superseded content verbatim.
+        let c =
+            ingest_candidates(&mut store, &embedder, tag, vec![fact("I use MySQL")], &p).unwrap();
+        assert!(c.added.is_empty(), "must not resurrect a superseded belief");
+        assert_eq!(c.reinforced, a.added, "recorded against the historical row");
+
+        // Exactly one active head — the correction — and the old version stays
+        // history with its lineage intact.
+        assert_eq!(store.count(tag).unwrap(), 1);
+        assert_eq!(store.list_latest(tag, 10).unwrap()[0].id, b.added[0]);
+        let old = store.get(&a.added[0]).unwrap().unwrap();
+        assert!(!old.is_latest);
+        assert_eq!(
+            store.get(&b.added[0]).unwrap().unwrap().parent_id,
+            a.added.first().cloned()
+        );
+    }
+
+    #[test]
+    fn reingesting_a_forgotten_chain_head_resurrects_it_with_lineage() {
+        // When the *head* of a chain is forgotten (no active successor), restating
+        // its content resurrects it — keeping its chain position rather than
+        // resetting parent/root and orphaning the lineage.
+        let correction = "Actually I no longer use MySQL, switching to Postgres";
+        let embedder = MapEmbedder::new(&[
+            ("I use MySQL", vec![1.0, 0.0, 0.0]),
+            (correction, vec![0.9, 0.4, 0.0]),
+        ]);
+        let mut store = SqliteStore::open_in_memory(3).unwrap();
+        let tag = "t";
+        let p = IngestParams::default();
+
+        let a =
+            ingest_candidates(&mut store, &embedder, tag, vec![fact("I use MySQL")], &p).unwrap();
+        let b = ingest_candidates(&mut store, &embedder, tag, vec![fact(correction)], &p).unwrap();
+        store.forget(&b.added[0]).unwrap();
+
+        let again =
+            ingest_candidates(&mut store, &embedder, tag, vec![fact(correction)], &p).unwrap();
+        assert_eq!(again.added, b.added, "resurrected, not reinforced");
+        let head = store.get(&b.added[0]).unwrap().unwrap();
+        assert!(head.is_latest);
+        assert_eq!(
+            head.parent_id,
+            a.added.first().cloned(),
+            "lineage preserved"
+        );
+        assert_eq!(head.root_id, a.added.first().cloned());
+        assert_eq!(store.count(tag).unwrap(), 1);
     }
 
     #[test]

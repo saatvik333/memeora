@@ -50,9 +50,12 @@
     if (hit) return { ...hit, is_latest: true, last_accessed_at: hit.created_at };
     return null;
   });
-  // A memory already forgotten (this session) or superseded can't be forgotten again.
-  let isForgotten = $derived(
-    !!selected && (forgotten.includes(selected.id) || !selected.is_latest),
+  // Forgotten this session (known precisely), or no longer current server-side.
+  // The wire only carries `is_latest`, which is false for both a superseded
+  // version and a soft-forgotten memory — don't claim to know which.
+  let sessionForgotten = $derived(!!selected && forgotten.includes(selected.id));
+  let notCurrent = $derived(
+    sessionForgotten || (!!selected && !selected.is_latest),
   );
 
   // Stable callbacks so passing them to <GraphView> never rebuilds its layout.
@@ -68,13 +71,23 @@
     }
   }
 
+  // Request sequencing: responses arriving out of order (slow fetch for a
+  // previously-selected scope, overlapping SSE-triggered reloads) are dropped
+  // instead of overwriting fresher state.
+  let graphSeq = 0;
+  let searchSeq = 0;
+
   async function loadGraph(scope: string) {
+    const seq = ++graphSeq;
     graphLoading = true;
     try {
-      graph = await api.graph(scope);
+      const g = await api.graph(scope);
+      if (seq !== graphSeq) return; // stale response — a newer request owns the state
+      graph = g;
       error = null;
       if (!graph.nodes.length) graphLoading = false; // no graph to lay out
     } catch (e) {
+      if (seq !== graphSeq) return;
       error = String(e);
       graphLoading = false;
     }
@@ -88,6 +101,7 @@
     searched = false;
     query = "";
     forgotten = [];
+    searchSeq++; // invalidate any in-flight search from the previous scope
     loadGraph(tag);
   }
 
@@ -97,15 +111,19 @@
       searched = false;
       return;
     }
+    const seq = ++searchSeq;
     searching = true;
     try {
-      results = await api.search(current, query);
+      const r = await api.search(current, query);
+      if (seq !== searchSeq) return; // stale response — a newer request owns the state
+      results = r;
       searched = true;
       selectedId = null; // show results, not a lingering inspector
     } catch (e) {
+      if (seq !== searchSeq) return;
       error = String(e);
     } finally {
-      searching = false;
+      if (seq === searchSeq) searching = false;
     }
   }
 
@@ -244,8 +262,10 @@
             {#if selected}
               <div class="section">
                 <span class="kind">{selected.kind}</span>
-                {#if isForgotten}
+                {#if sessionForgotten}
                   <span class="kind is-muted">forgotten</span>
+                {:else if notCurrent}
+                  <span class="kind is-muted">not current</span>
                 {/if}
                 <p class="content">{selected.content}</p>
                 <dl class="meta">
@@ -259,8 +279,12 @@
                   <dd class="mono">{selected.id.slice(0, 16)}…</dd>
                 </dl>
 
-                {#if isForgotten}
+                {#if sessionForgotten}
                   <p class="muted">Soft-forgotten — hidden from recall.</p>
+                {:else if notCurrent}
+                  <p class="muted">
+                    Not the current version — superseded by an update or soft-forgotten.
+                  </p>
                 {:else}
                   <AlertDialog.Root>
                     <AlertDialog.Trigger class="btn btn-danger">Forget</AlertDialog.Trigger>

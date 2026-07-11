@@ -175,16 +175,27 @@ fn run_models(cmd: &ModelsCmd) -> Result<(), Box<dyn Error>> {
 }
 
 /// The dashboard URL from `$MEMEORA_DASHBOARD_ADDR` (default
-/// [`DEFAULT_DASHBOARD_ADDR`]), or `None` if the dashboard is disabled (`off`).
+/// [`DEFAULT_DASHBOARD_ADDR`]), or `None` if the daemon won't serve it.
 fn dashboard_url() -> Option<String> {
     let raw = std::env::var("MEMEORA_DASHBOARD_ADDR")
         .unwrap_or_else(|_| DEFAULT_DASHBOARD_ADDR.to_string());
+    dashboard_url_from(&raw)
+}
+
+/// Mirrors the daemon's gating rule (`dashboard_addr` in `crates/daemon/src/run.rs`
+/// — the source of truth): the daemon serves the dashboard only for a parseable,
+/// loopback `SocketAddr`, refusing non-loopback binds (it is unauthenticated) and
+/// disabling on `off`/empty/unparseable. The CLI must not print or open a URL the
+/// daemon never serves.
+fn dashboard_url_from(raw: &str) -> Option<String> {
     if raw.is_empty() || raw.eq_ignore_ascii_case("off") {
         return None;
     }
-    // A wildcard bind address isn't browsable — point the browser at loopback.
-    let host = raw.replace("0.0.0.0", "127.0.0.1");
-    Some(format!("http://{host}"))
+    let addr: std::net::SocketAddr = raw.parse().ok()?;
+    if !addr.ip().is_loopback() {
+        return None;
+    }
+    Some(format!("http://{addr}"))
 }
 
 /// Best-effort browser launch for the host platform.
@@ -302,7 +313,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                 }
                 None => {
-                    println!("the dashboard is disabled (MEMEORA_DASHBOARD_ADDR=off on the daemon)")
+                    println!(
+                        "the dashboard is disabled (MEMEORA_DASHBOARD_ADDR is off, invalid, or \
+                         non-loopback — the daemon refuses to serve it)"
+                    )
                 }
             }
         }
@@ -323,5 +337,27 @@ mod tests {
     fn cli_definition_is_valid() {
         // clap's own lint: catches conflicting args, bad defaults, etc.
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn dashboard_url_matches_daemon_gating() {
+        // Served: loopback addresses (v4 and v6).
+        assert_eq!(
+            dashboard_url_from("127.0.0.1:7878").as_deref(),
+            Some("http://127.0.0.1:7878")
+        );
+        assert_eq!(
+            dashboard_url_from("[::1]:7878").as_deref(),
+            Some("http://[::1]:7878")
+        );
+        // Not served by the daemon → no URL: off/empty, non-loopback (refused),
+        // and unparseable (hostname or bare port).
+        assert_eq!(dashboard_url_from("off"), None);
+        assert_eq!(dashboard_url_from("OFF"), None);
+        assert_eq!(dashboard_url_from(""), None);
+        assert_eq!(dashboard_url_from("0.0.0.0:7878"), None);
+        assert_eq!(dashboard_url_from("192.168.1.5:7878"), None);
+        assert_eq!(dashboard_url_from("localhost:7878"), None);
+        assert_eq!(dashboard_url_from("7878"), None);
     }
 }

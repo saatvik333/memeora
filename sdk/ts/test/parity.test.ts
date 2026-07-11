@@ -23,10 +23,29 @@ test("PROTOCOL_VERSION matches the Rust proto", () => {
 
 test("capability tokens match the Rust proto", () => {
   const lib = rust("crates/proto/src/lib.rs");
-  const expected = ["ingest", "add", "recall", "context", "list", "forget"];
+  const expected = [
+    "ingest",
+    "add",
+    "recall",
+    "context",
+    "list",
+    "forget",
+    "token_budget",
+    "evidence",
+  ];
   for (const cap of expected) {
     expect(lib).toContain(`pub const ${cap.toUpperCase()}: &str = "${cap}";`);
   }
+  // Pin the canonical set itself: `capability::ALL` must be exactly `expected`
+  // (same tokens, same order), so adding, removing, or renaming a token in the
+  // Rust proto fails here until this list is updated to match.
+  const all = lib.match(/pub const ALL:\s*&\[&str\]\s*=\s*&\[([^\]]*)\]/);
+  expect(all).not.toBeNull();
+  const tokens = all![1]!
+    .split(",")
+    .map((t) => t.trim())
+    .filter((t) => t.length > 0);
+  expect(tokens).toEqual(expected.map((cap) => cap.toUpperCase()));
 });
 
 test("MAX_MESSAGE_BYTES matches the Rust framing", () => {

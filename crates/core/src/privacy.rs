@@ -75,6 +75,12 @@ pub fn redact(text: &str) -> String {
                 after_auth_scheme = is_auth_scheme(&word);
                 word.clear();
             }
+            if ch == '\n' {
+                // An auth-scheme cue never carries across lines: headers put the
+                // credential on the same line, so a line ending in "Basic"/"Bearer"
+                // must not mask the first long word of the next line.
+                after_auth_scheme = false;
+            }
             out.push(ch); // preserve the exact whitespace char verbatim
         } else {
             word.push(ch);
@@ -95,8 +101,20 @@ const SENSITIVE_KEYS: &[&str] = &[
     "api_key",
     "apikey",
     "access_key",
-    "auth",
 ];
+
+/// Sensitive keys matched as whole `_`/`-`-delimited segments, not substrings —
+/// "auth" as a substring would also hit benign keys like "author".
+const SENSITIVE_KEY_WORDS: &[&str] = &["auth", "oauth", "authorization"];
+
+/// Whether a lowercased `key=value` key is sensitive: a substring hit for the
+/// unambiguous keys, or a whole-segment hit for the auth family.
+fn is_sensitive_key(key_core: &str) -> bool {
+    SENSITIVE_KEYS.iter().any(|s| key_core.contains(s))
+        || key_core
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|seg| SENSITIVE_KEY_WORDS.contains(&seg))
+}
 
 /// Known secret token prefixes (GitHub, OpenAI, AWS, Google, Slack, GitLab).
 const SECRET_PREFIXES: &[&str] = &[
@@ -152,7 +170,7 @@ fn redact_word(word: &str, after_auth_scheme: bool) -> String {
         let key_core = key
             .trim_matches(|c: char| !c.is_ascii_alphanumeric())
             .to_ascii_lowercase();
-        if !value.is_empty() && SENSITIVE_KEYS.iter().any(|s| key_core.contains(s)) {
+        if !value.is_empty() && is_sensitive_key(&key_core) {
             // `rest` starts with the (1-byte ASCII) separator we matched.
             return format!("{key}{}[REDACTED]", &rest[..1]);
         }
@@ -191,13 +209,18 @@ fn is_auth_scheme(word: &str) -> bool {
 /// rather than a prose word — used only after an auth-scheme cue, to bound false
 /// positives on ordinary following words.
 fn looks_token(core: &str) -> bool {
-    // No digit requirement: after an explicit auth-scheme cue, a 12+ char token-charset
-    // word is a credential even if it's all letters (e.g. a JWT segment). The auth-scheme
-    // context is the guard against false positives, not the digit.
+    // Length + charset alone would mask prose ("basic understanding" → the 13-char
+    // all-lowercase "understanding"), so additionally require a non-prose signal:
+    // a digit, a token separator, or interior uppercase (mixed case past the first
+    // char, which prose words and Capitalized sentence starts don't have). JWTs and
+    // base64 blobs always carry at least one of these.
     core.len() >= 12
         && core
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || "-_+/=.".contains(c))
+        && (core.chars().any(|c| c.is_ascii_digit())
+            || core.chars().any(|c| "-_+/=.".contains(c))
+            || core.chars().skip(1).any(|c| c.is_ascii_uppercase()))
 }
 
 #[cfg(test)]
@@ -299,6 +322,52 @@ mod tests {
         );
         // The word after "bearer" in ordinary prose must NOT be redacted.
         assert_eq!(redact("the bearer of bad news"), "the bearer of bad news");
+    }
+
+    #[test]
+    fn auth_scheme_words_in_prose_do_not_redact() {
+        // "basic"/"bearer" as ordinary English must not mask the following word,
+        // even a long one (all-lowercase / Capitalized words are prose, not tokens).
+        for prose in [
+            "a basic understanding of the problem",
+            "basic configuration is required",
+            "Basic Authentication is a scheme",
+            "the bearer presentation went well",
+        ] {
+            assert_eq!(redact(prose), prose);
+        }
+        // The cue does not survive a line break: headers keep scheme + credential
+        // on one line, so the next line's first long word stays untouched.
+        let multiline = "the mode is Basic\nunderstanding follows tomorrow";
+        assert_eq!(redact(multiline), multiline);
+    }
+
+    #[test]
+    fn real_tokens_after_auth_scheme_still_redact() {
+        // A JWT (dots + digits) after "Bearer" must always be masked.
+        let jwt = redact("Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig");
+        assert!(jwt.contains("[REDACTED]"), "{jwt:?}");
+        assert!(!jwt.contains("eyJhbGci"), "{jwt:?}");
+        // Base64-ish Basic credentials (mixed case + digits) too.
+        let basic = redact("Authorization: Basic dXNlcjpwYXNzd29yZDEyMw==");
+        assert!(basic.contains("[REDACTED]"), "{basic:?}");
+        assert!(!basic.contains("dXNlcjpw"), "{basic:?}");
+    }
+
+    #[test]
+    fn auth_key_matches_whole_segment_not_substring() {
+        // "author" must not trip the "auth" sensitive key.
+        assert_eq!(redact("author=Jane Doe"), "author=Jane Doe");
+        assert_eq!(redact("see ?author=jane&ref=x"), "see ?author=jane&ref=x");
+        // Real auth-family keys are still masked.
+        let auth = redact("auth=supersecretvalue");
+        assert_eq!(auth, "auth=[REDACTED]");
+        let hdr = redact("x-auth-token:abc123");
+        assert!(hdr.contains("[REDACTED]"), "{hdr:?}");
+        let oauth = redact("oauth:abc123");
+        assert!(oauth.contains("[REDACTED]"), "{oauth:?}");
+        let authz = redact("authorization=abc123");
+        assert!(authz.contains("[REDACTED]"), "{authz:?}");
     }
 
     #[test]

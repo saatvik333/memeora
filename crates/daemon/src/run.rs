@@ -101,11 +101,13 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         && !report.ok()
     {
         let (ok, mismatch, missing) = report.counts();
-        eprintln!(
-            "memeora-daemon: WARNING model integrity check failed in {} \
-             ({ok} ok, {mismatch} mismatched, {missing} missing); re-download or re-bundle",
+        return Err(format!(
+            "model integrity check failed in {} ({ok} ok, {mismatch} mismatched, \
+             {missing} missing); refusing to load corrupt/tampered weights — \
+             re-download or re-bundle (see `memeora models bundle`)",
             model_cache.display()
-        );
+        )
+        .into());
     }
 
     // Offline-first: don't silently reach out to HuggingFace on first run. If the

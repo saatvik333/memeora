@@ -192,8 +192,6 @@ install_binaries() {
 			run cargo install --git "https://github.com/${REPO}" memeora
 			;;
 		cargo-dist|*)
-			_args=""
-			[ -n "$INSTALL_DIR" ] && _args="--install-dir $INSTALL_DIR"
 			info "fetching the cargo-dist installer"
 			_tmp=$(mktemp)
 			if ! fetch "$DIST_INSTALLER" >"$_tmp" || [ ! -s "$_tmp" ]; then
@@ -205,8 +203,13 @@ install_binaries() {
 					die "no binaries installed; see https://github.com/${REPO}#install"
 				fi
 			else
-				# shellcheck disable=SC2086
-				run sh "$_tmp" $_args
+				# Quote the install dir (it may contain spaces); no array support in sh,
+				# so branch instead of word-splitting a flat string.
+				if [ -n "$INSTALL_DIR" ]; then
+					run sh "$_tmp" --install-dir "$INSTALL_DIR"
+				else
+					run sh "$_tmp"
+				fi
 				rm -f "$_tmp"
 			fi
 			;;

@@ -23,6 +23,10 @@ export interface MemoryDto {
   created_at: number;
   /** Relevance score for search results; absent for plain listings. */
   score?: number | null;
+  /** Coarse freshness/trend label (`new`/`strengthening`/`stable`/`weakening`/`stale`)
+   * from decay × distinct-source proof. Absent from older daemons; gate on the
+   * `evidence` capability. */
+  freshness?: string | null;
 }
 
 interface HelloResponse {
@@ -136,9 +140,19 @@ export class Client {
     return this.capabilities.includes(capability);
   }
 
-  /** Ingest raw text; returns the `(added, reinforced)` counts. */
-  async ingest(scope: string, text: string): Promise<{ added: number; reinforced: number }> {
-    const r = await this.call({ op: "ingest", scope, text });
+  /**
+   * Ingest raw text; returns the `(added, reinforced)` counts.
+   *
+   * `source` optionally attributes the text to an observer (an agent/session id) so
+   * repeated corroboration from the same source can't inflate a memory's proof. Gate
+   * on the `evidence` capability; omit it for the unattributed default.
+   */
+  async ingest(
+    scope: string,
+    text: string,
+    source?: string,
+  ): Promise<{ added: number; reinforced: number }> {
+    const r = await this.call({ op: "ingest", scope, text, source });
     if (r.type === "ingested") return { added: r.added, reinforced: r.reinforced };
     throw this.unexpected(r);
   }
@@ -150,9 +164,15 @@ export class Client {
     throw this.unexpected(r);
   }
 
-  /** Hybrid search within a scope. */
-  async recall(scope: string, query: string, k = 10): Promise<MemoryDto[]> {
-    const r = await this.call({ op: "recall", scope, query, k });
+  /**
+   * Hybrid search within a scope.
+   *
+   * When `maxTokens` is set, the daemon fills results best-first up to that many
+   * estimated tokens instead of a fixed `k` (which still caps the count). Gate on
+   * the `token_budget` capability; omit it for the plain top-`k` path.
+   */
+  async recall(scope: string, query: string, k = 10, maxTokens?: number): Promise<MemoryDto[]> {
+    const r = await this.call({ op: "recall", scope, query, k, max_tokens: maxTokens });
     if (r.type === "memories") return r.memories;
     throw this.unexpected(r);
   }

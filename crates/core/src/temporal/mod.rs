@@ -95,7 +95,9 @@ fn n_units_ago(lower: &str, now: i64) -> Option<Span> {
 /// `None`. Ignores a date embedded in a longer digit run (e.g. version strings).
 fn first_iso_date(text: &str) -> Option<i64> {
     let bytes = text.as_bytes();
-    for i in 0..bytes.len() {
+    // `char_indices` so the slice below always starts at a char boundary — raw byte
+    // offsets panic on non-ASCII text (a date can only start at a boundary anyway).
+    for (i, _) in text.char_indices() {
         // Don't start a match in the middle of a number (avoid "12025-01-01").
         if i > 0 && bytes[i - 1].is_ascii_digit() {
             continue;
@@ -179,6 +181,15 @@ mod tests {
     fn iso_ignored_inside_longer_number() {
         // A date glued to extra digits is not a date.
         assert!(parse("build 12026-06-12x", NOW).is_none());
+    }
+
+    #[test]
+    fn non_ascii_text_is_scanned_without_panicking() {
+        // Multi-byte chars must not break the scan (byte offsets that land inside a
+        // char used to panic the whole extractor) — and a date after them still parses.
+        let (start, _) = parse("café ☕ reopened on 2026-06-12", NOW).unwrap();
+        assert_eq!(start, days_from_civil(2026, 6, 12) * DAY);
+        assert!(parse("señor café — no date here", NOW).is_none());
     }
 
     #[test]

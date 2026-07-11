@@ -53,6 +53,10 @@ struct Expect {
     captured_contains: Option<Vec<String>>,
     /// Substrings the captured text MUST NOT contain (e.g. seeded secrets).
     captured_excludes: Option<Vec<String>>,
+    /// Whether the captured text must be empty — pins the graceful no-capture
+    /// (rather than crash/garbage) behavior for transcript shapes the pipeline
+    /// doesn't understand.
+    captured_is_empty: Option<bool>,
 }
 
 fn fixtures_dir() -> PathBuf {
@@ -129,6 +133,14 @@ fn check(path: &Path) {
             assert!(
                 !captured.contains(needle.as_str()),
                 "{}: captured text leaked {needle:?}\n--- got ---\n{captured}",
+                path.display()
+            );
+        }
+        if let Some(want_empty) = fx.expect.captured_is_empty {
+            assert_eq!(
+                captured.trim().is_empty(),
+                want_empty,
+                "{}: captured_is_empty\n--- got ---\n{captured}",
                 path.display()
             );
         }

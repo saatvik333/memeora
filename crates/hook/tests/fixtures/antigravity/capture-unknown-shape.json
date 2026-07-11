@@ -1,0 +1,11 @@
+{
+  "host": "antigravity",
+  "event": "stop",
+  "payload": { "workspacePaths": ["/ws/a"], "transcriptPath": "/ws/a/.antigravity/t.jsonl" },
+  "expect": {
+    "transcript_path": "/ws/a/.antigravity/t.jsonl",
+    "transcript_jsonl": "{\"turnRole\":\"user\",\"turnContent\":\"do the thing\"}\n{\"payload\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"differently nested\"}]}}\n{\"toolInvocations\":[{\"tool\":\"edit\",\"filePath\":\"src/a.rs\"}]}",
+    "captured_is_empty": true,
+    "captured_excludes": ["do the thing", "differently nested", "src/a.rs"]
+  }
+}

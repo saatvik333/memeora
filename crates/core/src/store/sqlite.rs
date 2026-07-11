@@ -133,18 +133,28 @@ impl SqliteStore {
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
         // Only keep edges whose endpoints both survived the node cap, so the UI
-        // never references a missing node.
-        let ids: std::collections::HashSet<&str> = nodes.iter().map(|m| m.id.as_str()).collect();
+        // never references a missing node. The cap is applied in SQL (the CTE
+        // repeats the node query above) so the work scales with `cap`, not with
+        // every edge in the container.
         let mut edge_stmt = self.conn.prepare(
-            "SELECT r.from_id, r.to_id, r.kind, r.created_at
+            "WITH capped AS (
+                 SELECT m.id FROM memories m
+                 WHERE m.container_tag = ?1
+                 ORDER BY m.created_at DESC, m.rowid DESC
+                 LIMIT ?2
+             )
+             SELECT r.from_id, r.to_id, r.kind, r.created_at
              FROM relationships r
-             JOIN memories mf ON mf.id = r.from_id
-             JOIN memories mt ON mt.id = r.to_id
-             WHERE mf.container_tag = ?1 AND mt.container_tag = ?1
+             JOIN capped cf ON cf.id = r.from_id
+             JOIN capped ct ON ct.id = r.to_id
              ORDER BY r.created_at",
         )?;
+        // Belt-and-braces re-check against the nodes actually returned: each
+        // statement reads its own snapshot, so a commit landing between the two
+        // queries could shift the capped set.
+        let ids: std::collections::HashSet<&str> = nodes.iter().map(|m| m.id.as_str()).collect();
         let edges: Vec<Relationship> = edge_stmt
-            .query_map(params![container_tag], |row| {
+            .query_map(params![container_tag, cap as i64], |row| {
                 Ok(Relationship {
                     from_id: row.get(0)?,
                     to_id: row.get(1)?,
@@ -171,15 +181,26 @@ impl SqliteStore {
         // write lock up front — right for the sole-writer daemon (no mid-batch lock
         // upgrade that could fail with SQLITE_BUSY).
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
-        match f(self) {
-            Ok(value) => {
+        // Catch a panic in `f` so the unwind can't skip past the ROLLBACK: the daemon's
+        // writer-actor survives panics (catch_unwind, same connection), and an open
+        // BEGIN IMMEDIATE left behind would fail every later write with "cannot start a
+        // transaction within a transaction". Roll back, then resume the unwind so the
+        // panic still surfaces to the caller unchanged. AssertUnwindSafe is sound here:
+        // the rollback restores the only state `f` mutates through `&mut Self`.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self)));
+        match result {
+            Ok(Ok(value)) => {
                 self.conn.execute_batch("COMMIT")?;
                 Ok(value)
             }
-            Err(err) => {
+            Ok(Err(err)) => {
                 // Best-effort rollback; surface the original error, not a rollback one.
                 let _ = self.conn.execute_batch("ROLLBACK");
                 Err(err)
+            }
+            Err(payload) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                std::panic::resume_unwind(payload)
             }
         }
     }
@@ -697,6 +718,28 @@ mod tests {
 
     fn mem(id: &str, content: &str, tag: &str, emb: Vec<f32>) -> Memory {
         Memory::new(id, content, MemoryKind::Fact, tag, emb)
+    }
+
+    #[test]
+    fn panic_in_transaction_rolls_back_and_frees_the_connection() {
+        // The daemon's writer-actor survives handler panics (catch_unwind) and keeps
+        // using this store: an unwind out of `f` must not leave the connection
+        // mid-transaction (every later BEGIN would fail with "cannot start a
+        // transaction within a transaction") or keep the panicking batch's writes.
+        let mut s = SqliteStore::open_in_memory(2).unwrap();
+        let tag = "t";
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = s.transaction::<()>(|st| {
+                st.upsert(&mem("m1", "doomed", tag, vec![1.0, 0.0]))?;
+                panic!("boom");
+            });
+        }));
+        assert!(unwind.is_err(), "the panic must still propagate");
+        // The batch rolled back and the connection accepts new transactions.
+        assert_eq!(s.count(tag).unwrap(), 0);
+        s.transaction(|st| st.upsert(&mem("m2", "alive", tag, vec![0.0, 1.0])))
+            .unwrap();
+        assert_eq!(s.count(tag).unwrap(), 1);
     }
 
     #[test]

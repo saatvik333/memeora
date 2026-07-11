@@ -255,9 +255,11 @@ where
 {
     let store = Arc::clone(&st.store);
     tokio::task::spawn_blocking(move || {
-        let guard = store
-            .lock()
-            .map_err(|_| ApiError::internal("store lock poisoned"))?;
+        // Recover the guard even if a previous closure panicked: the store is a
+        // read-only connection and `f` only gets `&SqliteStore` (statements are
+        // finalized on unwind), so a poisoned lock is harmless — treating it as
+        // fatal would brick every read endpoint after one bad query.
+        let guard = store.lock().unwrap_or_else(|p| p.into_inner());
         f(&guard).map_err(ApiError::internal)
     })
     .await

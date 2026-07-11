@@ -126,6 +126,52 @@ test("response split across chunks is reassembled", async () => {
   c.close();
 });
 
+test("recall forwards max_tokens and surfaces freshness; omits it when unset", async () => {
+  const seen: any[] = [];
+  const p = await startStub(
+    withHello((req, s) => {
+      if (req.op === "recall") {
+        seen.push(req);
+        s.write(
+          frame({
+            type: "memories",
+            memories: [
+              { id: "m1", content: "hi", kind: "fact", strength: 1, created_at: 1, score: 0.5, freshness: "stale" },
+            ],
+          }),
+        );
+      }
+    }),
+  );
+  const c = await Client.connect(p);
+  const budgeted = await c.recall("s", "q", 5, 2000);
+  expect(budgeted[0]!.freshness).toBe("stale");
+  await c.recall("s", "q", 5);
+  expect(seen[0].max_tokens).toBe(2000);
+  // Omitted budget must not appear on the wire (additive field, older daemons).
+  expect("max_tokens" in seen[1]).toBe(false);
+  c.close();
+});
+
+test("ingest forwards source; omits it when unset", async () => {
+  const seen: any[] = [];
+  const p = await startStub(
+    withHello((req, s) => {
+      if (req.op === "ingest") {
+        seen.push(req);
+        s.write(frame({ type: "ingested", added: 1, reinforced: 0 }));
+      }
+    }),
+  );
+  const c = await Client.connect(p);
+  await c.ingest("s", "I prefer rust", "agent-x");
+  await c.ingest("s", "I prefer rust");
+  expect(seen[0].source).toBe("agent-x");
+  // Omitted source must not appear on the wire (additive field, older daemons).
+  expect("source" in seen[1]).toBe(false);
+  c.close();
+});
+
 test("concurrent calls resolve in FIFO order", async () => {
   const p = await startStub(
     withHello((req, s) => {

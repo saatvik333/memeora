@@ -76,7 +76,17 @@ fn resolve_descriptor(args: &Args) -> Result<HostDescriptor, Box<dyn Error>> {
 /// Parse args, read the stdin payload, and inject or capture per the descriptor.
 pub fn run() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
-    let desc = resolve_descriptor(&args)?;
+    // Best-effort like every other failure path: a stale --descriptor path or a
+    // misspelled --host in a wired-up hook config must not exit non-zero on every
+    // event (some hosts treat that as a hard error). Note it on stderr and no-op.
+    // (Unusable args themselves are still rejected by clap with a non-zero exit.)
+    let desc = match resolve_descriptor(&args) {
+        Ok(desc) => desc,
+        Err(e) => {
+            eprintln!("memeora-hook: {e} (skipping — memory hooks are best-effort)");
+            return Ok(());
+        }
+    };
 
     // Read stdin best-effort: a failure (broken pipe, non-UTF-8) must not make the
     // hook exit non-zero, which some hosts treat as a hard error.
@@ -114,6 +124,11 @@ fn capture(socket: &str, scope: &str, desc: &HostDescriptor, payload: &Value) {
     let Some(path) = transcript_path(desc, payload) else {
         return;
     };
+    // ponytail: re-reads and re-parses the whole transcript on every Stop/PreCompact,
+    // so per-session hook work is O(n²) in transcript size. The hook keeps no state
+    // on disk today; if long sessions make this visible, persist a per-transcript
+    // byte offset (seek before reading, full re-read on truncation/rotation) in a
+    // hook state dir once one exists.
     let Ok(jsonl) = std::fs::read_to_string(&path) else {
         return;
     };
