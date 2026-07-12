@@ -7,23 +7,26 @@ memeora gives your AI coding tools **persistent memory** — it learns facts fro
 builds a knowledge graph, and recalls the right context at the right time. It's a free,
 **local-first**, open alternative to hosted memory APIs: **no required LLM, no API key, works offline.**
 
-> **Status:** Steps 1–10 implemented (v0.1.0), plus the **step-11 engine-evolution core**
-> — session-aware capture, entity canonicalization, consolidation (`proof_count`), the
-> Ebbinghaus/Hebbian/Cepeda forgetting engine, the recall graph channel, and the opt-in
-> local-LLM extractor (off by default). The engine, its surfaces, per-tool
-> packaging, the local dashboard, the extensibility/ecosystem layer, and the
-> cross-platform **release pipeline** are end-to-end:
+> **Status:** Steps 1–10 implemented (v0.1.0), plus the **step-11 engine-evolution core** and
+> the **VISION-gap engine program (Phases 1–3)** — session-aware capture, entity
+> canonicalization, consolidation (`proof_count`), the Ebbinghaus/Hebbian/Cepeda forgetting
+> engine, the opt-in local-LLM extractor (off by default), bi-temporal valid-time +
+> version-chain supersession, 4-channel recall (dense + BM25 + graph + temporal) with
+> token-budget fill, and the distinct-source evidence/freshness model. The engine, its
+> surfaces, per-tool packaging, the local dashboard, the extensibility/ecosystem layer, and
+> the cross-platform **release pipeline** are end-to-end:
 > - **Engine (`crates/core`):** SQLite + statically-linked `sqlite-vec` KNN + FTS5 behind the
 >   `VectorStore` trait (container-tag scoping, soft-forget); `EmbeddingProvider` with a
->   content-hash cache and a local `fastembed` backend; hybrid retrieval (dense + BM25 fused
->   with **RRF**, expiry filtering, optional cross-encoder rerank); cached per-tag **profiles**;
->   Tier-0 **extraction**; and an **ingest** path that dedups/reinforces and links memories with
->   `extends` edges in a SQLite knowledge graph.
+>   content-hash cache and a local `fastembed` backend; **4-channel hybrid retrieval** (dense +
+>   BM25 + graph + temporal fused with **RRF**, token-budget fill, expiry filtering, optional
+>   cross-encoder rerank); cached per-tag **profiles**; Tier-0 **extraction**; and an
+>   **ingest** path that dedups/reinforces, links memories with `extends`/`updates` edges, and
+>   tracks bi-temporal valid-time + version-chain supersession in a SQLite knowledge graph.
 > - **Daemon + IPC:** versioned contract (`crates/proto`) with length-delimited framing; a
 >   blocking **writer-actor** server over `interprocess`; the daemon binary loads the model + DB
 >   and serves it.
 > - **Surfaces:** `memeora-client` (typed Rust SDK), `memeora-mcp` (rmcp MCP server — recall/
->   remember/context/list over stdio, **scope defaults to the current project**), the `memeora`
+>   remember/context/list/forget over stdio, **scope defaults to the current project**), the `memeora`
 >   **CLI**, and `memeora-hook` (multi-host command-hook: session-start/`PreInvocation` injection
 >   + `Stop`/`PreCompact` capture for Claude, Codex & Antigravity).
 > - **Adapters ([`adapters/`](adapters/)):** ready-to-install plugin bundles for **Claude Code**
@@ -68,9 +71,9 @@ builds a knowledge graph, and recalls the right context at the right time. It's 
 | `crates/proto` | versioned IPC contract (public) |
 | `crates/client` | Rust client SDK |
 | `crates/daemon` | blocking writer-actor daemon: holds models + DB, sole writer; embeds off the writer thread; serves the dashboard (axum + SSE) |
-| `crates/mcp` | `rmcp` MCP server (recall / remember / context / list) |
-| `crates/hook` | `memeora-hook` descriptor-driven command-hook binary (lib + bin) |
-| `crates/cli` | `memeora` CLI (doctor / add / ingest / recall / context / list / forget / scope / dashboard / adapter / models) — also the package that ships all four binaries |
+| `crates/mcp` | `rmcp` MCP server (recall / remember / context / list / forget) |
+| `crates/hook` | `memeora-hook` descriptor-driven command-hook library (its binary ships from `crates/cli`) |
+| `crates/cli` | `memeora` CLI (doctor / add / ingest / recall / context / list / forget / scope / dashboard / models) — also the package that ships all four binaries |
 | `dashboard/` | Svelte 5 + Vite + Sigma.js graph UI, embedded into the daemon via `rust-embed` |
 | `sdk/ts/` | `@memeora/client` — TypeScript client over the IPC protocol |
 | `adapters/_descriptors/` | data-driven host descriptors (claude / codex / antigravity) |

@@ -8,7 +8,7 @@ The only non-Rust adapter: a thin TypeScript plugin that forwards to the
 The `memeora` CLI (and the daemon) must be installed and running:
 
 ```sh
-cargo install --path crates/cli --path crates/daemon --path crates/mcp
+cargo install --path crates/cli   # builds memeora, memeora-mcp, memeora-hook, memeora-daemon
 memeora-daemon &
 ```
 

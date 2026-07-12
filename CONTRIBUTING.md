@@ -15,6 +15,11 @@ cargo fmt --all
 cargo deny check        # advisories + license policy (see deny.toml)
 ```
 
+CI runs these with `--all-features`, which also compiles the `fastembed`/ONNX
+stack — a plain `cargo test`/`cargo check` skips it. Run `scripts/check.sh`
+(the full local mirror of CI, including the TypeScript job) before pushing;
+`scripts/check.sh --fast` runs a quicker default-features-only loop.
+
 ## Commit conventions
 - **[Conventional Commits](https://www.conventionalcommits.org/)**, subject **< 200 characters**.
 - Format: `type(scope): summary` — e.g. `feat(core): add hybrid RRF search`, `fix(hook): handle empty stdin`.
@@ -23,7 +28,9 @@ cargo deny check        # advisories + license policy (see deny.toml)
 ## Workflow
 - **Think before implementing**; break work into a task hierarchy.
 - **Keep docs updated** alongside code — `docs/ARCHITECTURE.md` is the source of truth.
-- CI must pass: `fmt --check`, `clippy -D warnings`, `test`, and `cargo-deny`.
+- CI must pass: `fmt --check`, `clippy -D warnings --all-features`, `test --all-features`,
+  `cargo-deny`, and the TypeScript job (`sdk/ts` build+test, `dashboard` type-check+build,
+  `adapters/opencode` type-check).
 - New code matches surrounding style; format runs automatically on save.
 
 ## Adding a new harness (plugin ecosystem)

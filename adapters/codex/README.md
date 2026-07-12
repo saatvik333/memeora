@@ -10,7 +10,7 @@ Gives OpenAI Codex persistent memory via the same `memeora-mcp` server and
 `memeora-mcp` and `memeora-hook` on `PATH`, and the daemon running:
 
 ```sh
-cargo install --path crates/mcp --path crates/hook --path crates/daemon
+cargo install --path crates/cli   # builds memeora, memeora-mcp, memeora-hook, memeora-daemon
 memeora-daemon &
 ```
 

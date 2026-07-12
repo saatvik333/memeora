@@ -35,7 +35,7 @@ host MCP   ──► memeora-mcp            ──► daemon (recall/remember/co
 The binaries must be on `PATH` and the daemon running:
 
 ```sh
-cargo install --path crates/cli --path crates/mcp --path crates/hook --path crates/daemon
+cargo install --path crates/cli
 memeora-daemon &
 ```
 

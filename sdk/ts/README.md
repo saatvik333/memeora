@@ -30,6 +30,22 @@ console.log(client.getServerVersion(), client.getCapabilities());
 client.close();
 ```
 
+### Capability-gated params
+
+Some params only take effect on a daemon that advertises the matching
+capability (check with `client.supports("...")`); they're silently ignored by
+older daemons rather than erroring:
+
+- `ingest(scope, text, source?)` — `source` attributes the text to an observer
+  (an agent/session id) so repeated corroboration from the same source can't
+  inflate a memory's proof. Gate on `"evidence"`.
+- `recall(scope, query, k?, maxTokens?)` — when set, the daemon fills results
+  best-first up to `maxTokens` estimated tokens instead of a fixed `k` (which
+  still caps the count). Gate on `"token_budget"`.
+- `MemoryDto.freshness` — a coarse trend label (`new` / `strengthening` /
+  `stable` / `weakening` / `stale`) from decay × distinct-source proof, present
+  on results from a daemon with `"evidence"`; `null`/absent otherwise.
+
 ## Sockets
 
 `Client.connect(socket)` accepts:

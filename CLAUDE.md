@@ -14,7 +14,7 @@ Claude Code, Codex, Antigravity & OpenCode. Local-first, no required LLM, no API
 - `crates/proto` — versioned IPC contract (public, semver'd).
 - `crates/client` — Rust client SDK over the IPC.
 - `crates/daemon` — tokio process; holds models + DB; **sole DB writer**; async queue.
-- `crates/mcp` — `rmcp` MCP server (memory/recall/context/list).
+- `crates/mcp` — `rmcp` MCP server (recall/remember/context/list/forget).
 - `crates/hook` — `memeora-hook`: multi-host command-hook binary (`--host`).
 - `crates/cli` — `memeora` CLI (install/serve/doctor/index/dashboard).
 - `adapters/` — per-tool packaging; `dashboard/` — Svelte+Sigma.js UI (minimal styling).

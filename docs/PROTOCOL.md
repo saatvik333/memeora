@@ -33,6 +33,36 @@ Requests are a serde-tagged enum on `"op"`; responses on `"type"`:
 
 Any request can also come back as `{"type":"error","message":"…"}`.
 
+### Optional, capability-gated fields
+
+Beyond the required fields implied by each op, three fields are additive and
+`#[serde(default)]`, so older peers that omit them still round-trip; each is
+gated on a capability token rather than the version:
+
+| Field | On | Type | Gated by |
+|-------|----|------|----------|
+| `source` | `ingest` request | `string \| null` | `evidence` |
+| `max_tokens` | `recall` request | `number \| null` | `token_budget` |
+| `freshness` | `MemoryDto` (in `memories`/`context` responses) | `string \| null` | `evidence` |
+
+- `ingest.source` attributes ingested text to an observer (agent/session id).
+  Repeated corroboration from the *same* source can't inflate a memory's
+  `proof_count` — only distinct sources raise it. When omitted, each distinct
+  statement stands in as its own source.
+- `recall.max_tokens` fills results best-first up to that many estimated tokens
+  instead of a fixed `k` (`k` still caps the count).
+- `MemoryDto.freshness` is a coarse decay × distinct-source-proof trend label:
+  `new` / `strengthening` / `stable` / `weakening` / `stale`.
+
+```jsonc
+// client → daemon
+{ "op": "ingest", "scope": "repo_memeora", "text": "I prefer rust", "source": "agent-x" }
+{ "op": "recall", "scope": "repo_memeora", "query": "language", "k": 5, "max_tokens": 2000 }
+// daemon → client (a MemoryDto inside "memories"/"context")
+{ "id": "m1", "content": "I prefer rust", "kind": "preference", "strength": 1.0,
+  "created_at": 1700000000, "score": 0.42, "freshness": "stable" }
+```
+
 ## Handshake & capability negotiation
 
 The first message on a connection is `hello`:
@@ -42,7 +72,7 @@ The first message on a connection is `hello`:
 { "op": "hello", "protocol_version": 1 }
 // daemon → client
 { "type": "hello", "protocol_version": 1, "server_version": "0.1.0",
-  "capabilities": ["ingest","add","recall","context","list","forget"] }
+  "capabilities": ["ingest","add","recall","context","list","forget","token_budget","evidence"] }
 ```
 
 - `protocol_version` — the **wire** version. A client must refuse a daemon whose
@@ -50,7 +80,9 @@ The first message on a connection is `hello`:
   returns `io::ErrorKind::Unsupported`).
 - `capabilities` — the optional features/operations this daemon supports. Clients
   gate optional behavior on these tokens (`Client::supports(cap)`), **not** on the
-  version number.
+  version number. Two tokens gate fields rather than whole operations:
+  `token_budget` gates `max_tokens` on `recall`, and `evidence` gates `source` on
+  `ingest` plus `freshness` on returned memories (see below).
 
 ## Versioning policy
 

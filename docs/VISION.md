@@ -44,6 +44,13 @@ opt-in tier.
 
 ## The four pillars (each a concrete mechanism, not a slogan)
 
+> **Status (2026-07):** much of this has shipped in the engine — entity canonicalization,
+> the distinct-source evidence model + freshness trends, the Ebbinghaus/Hebbian/Cepeda
+> forgetting engine (memories; edge decay pending), bi-temporal valid-time, version-chain
+> supersession, and the opt-in local-LLM extractor with candidate self-repair. Still open:
+> multi-format ingestion, intent-specific context, LLM belief-phrasing/NLI, and the
+> benchmark harness. Details in `docs/ARCHITECTURE.md` (step-11 + VISION-gap status notes).
+
 ### 🧠 Learns — turns raw turns into durable, consolidated understanding
 - **Observation network** *(Hindsight)* — a consolidated-belief layer over raw memories.
   The bookkeeping is **heuristic and LLM-free**: `proof_count = |distinct source ids|`,
@@ -108,8 +115,9 @@ opt-in tier.
 
 ## The recall pipeline (one design, runs with zero required LLM)
 
-memeora has 2 of 4 channels today (dense + BM25 + RRF + optional rerank). The distilled
-pipeline — Hindsight's shape with its real constants as tunable starting points:
+**Shipped** (VISION-gap Phase 2): all four channels run today — dense + BM25 + graph +
+temporal, RRF-fused, with token-budget fill. The distilled pipeline — Hindsight's shape
+with its real constants as tunable starting points:
 
 1. **Four channels in parallel:** dense (sqlite-vec) · BM25 (FTS5) · **graph** · **temporal**.
    - *Graph activation* (fed into fusion as a ranked list):

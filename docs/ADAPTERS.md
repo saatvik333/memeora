@@ -11,7 +11,7 @@ There are three ways to integrate, easiest first.
 ## 1. MCP — zero code
 
 Any MCP-capable harness gets memory by pointing it at the `memeora-mcp` server
-(stdio). Tools: `recall`, `remember`, `context`, `list`. This is the universal
+(stdio). Tools: `recall`, `remember`, `context`, `list`, `forget`. This is the universal
 baseline — just a config entry. The scope defaults to the current project
 (`MEMEORA_PROJECT_ROOT` → cwd), or pass an explicit `scope`. The MCP server talks
 to the daemon over `$MEMEORA_SOCKET` (or `memeora-daemon.sock`), so hosts should
