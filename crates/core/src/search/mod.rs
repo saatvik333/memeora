@@ -11,6 +11,7 @@
 
 #[cfg(feature = "fastembed")]
 pub mod fastembed;
+pub mod query;
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -30,6 +31,20 @@ pub enum SearchMode {
     Text,
 }
 
+/// How to combine the per-signal ranked lists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Fusion {
+    /// Reciprocal Rank Fusion: sum `1/(rrf_k + rank)` across lists. Rewards items
+    /// ranked well in *several* signals — the right default for general recall.
+    #[default]
+    Rrf,
+    /// Round-robin interleave: take each list's #1, then each #2, … RRF's averaging
+    /// can bury an item that tops one signal but is absent from the others (a
+    /// near-duplicate "twin"); interleave guarantees every signal's best a slot.
+    /// Useful when the goal is coverage across signals rather than consensus.
+    Interleave,
+}
+
 /// Tuning for a [`search`] call.
 #[derive(Debug, Clone)]
 pub struct SearchParams {
@@ -37,6 +52,8 @@ pub struct SearchParams {
     pub k: usize,
     /// Which signals to fuse.
     pub mode: SearchMode,
+    /// How to combine the per-signal ranked lists.
+    pub fusion: Fusion,
     /// RRF constant: larger values flatten the contribution of top ranks.
     /// 60 is the value from the original RRF paper and a robust default.
     pub rrf_k: f32,
@@ -54,6 +71,7 @@ impl Default for SearchParams {
         SearchParams {
             k: 10,
             mode: SearchMode::Hybrid,
+            fusion: Fusion::Rrf,
             rrf_k: 60.0,
             candidate_multiplier: 4,
             max_tokens: None,
@@ -97,6 +115,51 @@ fn rrf_fuse(lists: &[Vec<ScoredMemory>], rrf_k: f32, k: usize, now: i64) -> Vec<
     fused
 }
 
+/// Round-robin interleave of ranked lists: take rank-1 of every list (in list
+/// order), then rank-2 of every list, and so on. The first appearance of a memory
+/// wins its slot; later duplicates are skipped. Expired memories are dropped.
+///
+/// Score is a descending rank proxy (`1/slot`) so downstream boost multiplication
+/// and the final sort behave; the *order* is what interleave controls, not the
+/// magnitude (unlike RRF, these scores aren't a calibrated relevance sum).
+fn interleave_fuse(lists: &[Vec<ScoredMemory>], k: usize, now: i64) -> Vec<ScoredMemory> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<ScoredMemory> = Vec::new();
+    let depth = lists.iter().map(Vec::len).max().unwrap_or(0);
+    for rank in 0..depth {
+        for list in lists {
+            let Some(scored) = list.get(rank) else {
+                continue;
+            };
+            if scored.memory.is_expired(now) || !seen.insert(scored.memory.id.clone()) {
+                continue;
+            }
+            let slot = out.len() + 1;
+            out.push(ScoredMemory {
+                memory: scored.memory.clone(),
+                score: 1.0 / slot as f32,
+            });
+            if out.len() >= k {
+                return out;
+            }
+        }
+    }
+    out
+}
+
+/// Combine ranked lists per the chosen [`Fusion`] strategy.
+fn fuse(
+    lists: &[Vec<ScoredMemory>],
+    params: &SearchParams,
+    k: usize,
+    now: i64,
+) -> Vec<ScoredMemory> {
+    match params.fusion {
+        Fusion::Rrf => rrf_fuse(lists, params.rrf_k, k, now),
+        Fusion::Interleave => interleave_fuse(lists, k, now),
+    }
+}
+
 /// Search `store` within `container_tag`, fusing the signals selected by `params`.
 ///
 /// `query_embedding` drives the dense KNN; `query_text` drives BM25. The caller
@@ -110,6 +173,9 @@ pub fn search(
     params: &SearchParams,
 ) -> Result<Vec<ScoredMemory>> {
     let now = now_unix();
+    // Strip agent-prepended preamble before it poisons BM25/temporal parsing; the
+    // caller already embedded the raw text, so only the lexical/temporal legs use this.
+    let query_text = query::sanitize_query(query_text);
     // A date in the query drives the temporal channel and the temporal-proximity boost.
     let window = crate::temporal::parse(query_text, now);
     let pool = params
@@ -149,7 +215,7 @@ pub fn search(
     // Fuse to an interim pool, apply bounded multiplicative boosts (recency from
     // stability-aware decay; corroboration from proof_count; temporal proximity to the
     // query window), then fill by token budget (or top-k).
-    let mut fused = rrf_fuse(&lists, params.rrf_k, pool, now);
+    let mut fused = fuse(&lists, params, pool, now);
     for scored in &mut fused {
         scored.score *= recency_boost(&scored.memory, now)
             * proof_boost(&scored.memory)
@@ -307,6 +373,35 @@ mod tests {
         assert!(fused[0].score > fused[1].score);
         // The two single-signal hits tie and trail the agreed-upon one.
         assert_eq!(fused.len(), 3);
+    }
+
+    #[test]
+    fn interleave_gives_each_signal_its_best_slot() {
+        // "dense_top" tops the dense list only; "text_top" tops text only; "both" is
+        // rank-2 in each. RRF would rank "both" first (agreement); interleave instead
+        // seats each signal's #1 first, so a twin that tops one signal isn't buried.
+        let dense = vec![scored("dense_top", None), scored("both", None)];
+        let text = vec![scored("text_top", None), scored("both", None)];
+        let out = interleave_fuse(&[dense, text], 10, 0);
+        assert_eq!(out[0].memory.id, "dense_top");
+        assert_eq!(out[1].memory.id, "text_top");
+        assert_eq!(out[2].memory.id, "both");
+        assert_eq!(out.len(), 3, "duplicates across lists are seated once");
+        assert!(
+            out[0].score > out[1].score,
+            "score is a descending rank proxy"
+        );
+    }
+
+    #[test]
+    fn interleave_drops_expired_and_caps_at_k() {
+        let dense = vec![scored("fresh", None), scored("stale", Some(1))];
+        let out = interleave_fuse(&[dense], 10, 1000);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].memory.id, "fresh");
+        // k cap.
+        let many = vec![scored("a", None), scored("b", None), scored("c", None)];
+        assert_eq!(interleave_fuse(&[many], 2, 0).len(), 2);
     }
 
     #[test]

@@ -1812,6 +1812,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "memeora-bench"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "memeora-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "memeora-client"
 version = "0.1.0"
 dependencies = [

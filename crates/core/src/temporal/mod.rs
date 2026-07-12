@@ -13,6 +13,10 @@
 
 const DAY: i64 = 86_400;
 
+/// Grace margin appended past a future deadline so the memory survives *through*
+/// the named day — "exam tomorrow" stays recallable until the day after the exam.
+const GRACE: i64 = DAY;
+
 /// A parsed occurred interval `(start, end)` in Unix seconds, mapping directly onto a
 /// memory's `(occurred_start, occurred_end)`. `end` is `None` for a bare point in
 /// time and `Some` for a bounded range ("last week", a calendar day).
@@ -66,6 +70,66 @@ pub fn parse(text: &str, now: i64) -> Option<Span> {
     .any(|m| lower.contains(m))
     {
         return Some((today, Some(today + DAY)));
+    }
+    None
+}
+
+/// Parse a *future* deadline from `text` relative to `now` (Unix seconds), returning
+/// the expiry instant — the end of the named day/window plus [`GRACE`] — or `None`
+/// when the text names no forward-looking time. The conservative twin of [`parse`]:
+/// it fires only on explicit future cues ("tomorrow", "next week/month",
+/// "in <n> <unit>", a not-yet-past ISO date), never on a guess, so a memory is only
+/// scheduled to drop from recall when its own text bounds it in time.
+pub fn parse_future(text: &str, now: i64) -> Option<i64> {
+    let lower = text.to_ascii_lowercase();
+    let today = day_start(now);
+
+    // Most specific: an explicit calendar date — a deadline only while not yet past
+    // (a date resolving to today still has the rest of its day ahead).
+    if let Some(day) = first_iso_date(&lower) {
+        let end = day + DAY;
+        return (end > now).then_some(end + GRACE);
+    }
+    // "in <n> <unit>(s)" — "renew the cert in 3 days".
+    if let Some(end) = in_n_units(&lower, now) {
+        return Some(end + GRACE);
+    }
+    // Coarse relative anchors. Order matters: a longer phrase that *contains* a
+    // shorter one ("day after tomorrow" ⊃ "tomorrow") must be tested first.
+    if lower.contains("day after tomorrow") {
+        return Some(today + 3 * DAY + GRACE);
+    }
+    if lower.contains("tomorrow") {
+        return Some(today + 2 * DAY + GRACE);
+    }
+    if lower.contains("next week") {
+        return Some(today + 8 * DAY + GRACE);
+    }
+    if lower.contains("next month") {
+        return Some(today + 31 * DAY + GRACE);
+    }
+    None
+}
+
+/// Parse an "in <n> <unit>(s)" phrase into the end of the day `<n>` units from now.
+fn in_n_units(lower: &str, now: i64) -> Option<i64> {
+    let tokens: Vec<&str> = lower.split_whitespace().collect();
+    for w in tokens.windows(3) {
+        if w[0] != "in" {
+            continue;
+        }
+        let Ok(n) = w[1].parse::<i64>() else { continue };
+        if n <= 0 {
+            continue;
+        }
+        let secs = match w[2].trim_end_matches('s') {
+            "day" => n * DAY,
+            "week" => n * 7 * DAY,
+            "month" => n * 30 * DAY,
+            "hour" => n * 3600,
+            _ => continue,
+        };
+        return Some(day_start(now + secs) + DAY);
     }
     None
 }
@@ -231,5 +295,58 @@ mod tests {
     fn no_temporal_cue_is_none() {
         assert!(parse("I prefer dark mode", NOW).is_none());
         assert!(parse("we use SQLite for storage", NOW).is_none());
+    }
+
+    #[test]
+    fn future_deadlines_expire_after_their_window() {
+        let today = day_start(NOW);
+        assert_eq!(
+            parse_future("the exam is tomorrow", NOW),
+            Some(today + 2 * DAY + GRACE)
+        );
+        assert_eq!(
+            parse_future("moved to the day after tomorrow", NOW),
+            Some(today + 3 * DAY + GRACE),
+            "longer phrase must beat the contained 'tomorrow'"
+        );
+        assert_eq!(
+            parse_future("the meeting is next week", NOW),
+            Some(today + 8 * DAY + GRACE)
+        );
+        assert_eq!(
+            parse_future("renew the cert in 3 days", NOW),
+            Some(day_start(NOW + 3 * DAY) + DAY + GRACE)
+        );
+        // An explicit not-yet-past ISO date is its own deadline cue.
+        let due = days_from_civil(2026, 8, 1) * DAY;
+        assert_eq!(
+            parse_future("report due 2026-08-01", NOW),
+            Some(due + DAY + GRACE)
+        );
+        // Every fired expiry is strictly after now.
+        assert!(parse_future("the exam is tomorrow", NOW).unwrap() > NOW);
+    }
+
+    #[test]
+    fn past_or_cueless_text_yields_no_expiry() {
+        assert!(parse_future("we shipped it yesterday", NOW).is_none());
+        assert!(parse_future("we met last week", NOW).is_none());
+        assert!(parse_future("we decided 3 days ago", NOW).is_none());
+        // A past ISO date is history, not a deadline.
+        assert!(parse_future("shipped on 2020-01-01", NOW).is_none());
+        assert!(parse_future("I prefer dark mode", NOW).is_none());
+        // A malformed count doesn't parse.
+        assert!(parse_future("in a few days", NOW).is_none());
+        assert!(parse_future("in 0 days", NOW).is_none());
+    }
+
+    #[test]
+    fn parse_future_is_non_ascii_safe() {
+        // Multi-byte chars must not panic the scan (mirrors `parse`'s guarantee).
+        assert_eq!(
+            parse_future("café ☕ the exam is tomorrow", NOW),
+            parse_future("the exam is tomorrow", NOW)
+        );
+        assert!(parse_future("señor café — mañana", NOW).is_none());
     }
 }

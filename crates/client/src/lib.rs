@@ -6,11 +6,21 @@
 //! framing and message types come from [`memeora_proto`].
 
 use std::io::{self, BufReader};
+use std::time::Duration;
 
-use interprocess::local_socket::{Stream, prelude::*};
+use interprocess::ConnectWaitMode;
+use interprocess::local_socket::{ConnectOptions, Stream, prelude::*};
 use memeora_proto::{
     DEFAULT_SOCKET, MemoryDto, PROTOCOL_VERSION, Request, Response, build_name, frame,
 };
+
+/// How long [`Client::connect`] waits for the daemon to accept the connection.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Per-operation socket deadline for reads and writes. A wedged daemon surfaces
+/// as a prompt [`io::ErrorKind::TimedOut`] error instead of blocking the caller
+/// forever (fail-open: the caller can degrade to "no memory" and move on).
+const IO_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A connected client to a memeora daemon.
 pub struct Client {
@@ -32,8 +42,26 @@ impl Client {
     /// Performs the protocol handshake and fails with [`io::ErrorKind::Unsupported`]
     /// if the daemon speaks a different [`PROTOCOL_VERSION`], so a version skew is a
     /// clear error here rather than an opaque deserialization failure later.
+    ///
+    /// Connecting is bounded by [`CONNECT_TIMEOUT`] and every subsequent read/write
+    /// (including the handshake) by [`IO_TIMEOUT`]; a hung daemon yields a
+    /// [`io::ErrorKind::TimedOut`] error rather than blocking forever.
     pub fn connect(socket: &str) -> io::Result<Self> {
-        let stream = Stream::connect(build_name(socket)?)?;
+        Self::connect_with_deadlines(socket, CONNECT_TIMEOUT, IO_TIMEOUT)
+    }
+
+    /// [`Self::connect`] with explicit deadlines (both must be nonzero).
+    fn connect_with_deadlines(
+        socket: &str,
+        connect_timeout: Duration,
+        io_timeout: Duration,
+    ) -> io::Result<Self> {
+        let stream: Stream = ConnectOptions::new()
+            .name(build_name(socket)?)
+            .wait_mode(ConnectWaitMode::Timeout(connect_timeout))
+            .connect_sync()?;
+        stream.set_recv_timeout(Some(io_timeout))?;
+        stream.set_send_timeout(Some(io_timeout))?;
         let mut client = Client {
             conn: BufReader::new(stream),
             server_version: String::new(),
@@ -54,9 +82,14 @@ impl Client {
     }
 
     /// Send one request and read its response.
+    ///
+    /// A [`TimedOut`](io::ErrorKind::TimedOut) error means the daemon missed the
+    /// I/O deadline; the stream may hold a partial frame afterwards, so drop this
+    /// client and reconnect rather than retrying the call on it.
     fn call(&mut self, request: &Request) -> io::Result<Response> {
-        frame::write_message(self.conn.get_mut(), request)?;
-        frame::read_message(&mut self.conn)?
+        frame::write_message(self.conn.get_mut(), request).map_err(deadline_err)?;
+        frame::read_message(&mut self.conn)
+            .map_err(deadline_err)?
             .ok_or_else(|| io::Error::other("daemon closed the connection"))
     }
 
@@ -185,6 +218,19 @@ impl Client {
     }
 }
 
+/// Normalize a socket-deadline expiry into a clear [`io::ErrorKind::TimedOut`]
+/// error. On Unix, `SO_RCVTIMEO`/`SO_SNDTIMEO` expiry surfaces as `WouldBlock`
+/// (EAGAIN); Windows named pipes report `TimedOut` — callers see one kind.
+fn deadline_err(e: io::Error) -> io::Error {
+    match e.kind() {
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("memeora daemon did not respond within the I/O deadline: {e}"),
+        ),
+        _ => e,
+    }
+}
+
 /// Map an error / unexpected response to an [`io::Error`].
 fn unexpected(response: Response) -> io::Error {
     match response {
@@ -268,5 +314,48 @@ mod tests {
         let (added, reinforced) = client.ingest("s", "I prefer rust. We use SQLite.").unwrap();
         assert_eq!(added, 2);
         assert_eq!(reinforced, 0);
+    }
+
+    #[test]
+    fn connect_to_missing_socket_fails_promptly() {
+        let start = std::time::Instant::now();
+        Client::connect("/tmp/memeora-test-no-such-daemon.sock")
+            .err()
+            .expect("connecting without a daemon must fail");
+        // No daemon means a prompt error, never a hang on the connect deadline.
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn read_deadline_fires_on_a_silent_daemon() {
+        use interprocess::local_socket::{ListenerOptions, traits::Listener as _};
+
+        let socket = "memeora-test-client-silent.sock";
+        let listener = ListenerOptions::new()
+            .name(memeora_proto::build_name(socket).unwrap())
+            .create_sync()
+            .unwrap();
+        // Accept the connection and hold it open without ever replying, so the
+        // handshake read can only end via the deadline (a drop would be a clean
+        // EOF and a different error).
+        thread::spawn(move || {
+            let conn = listener.accept();
+            thread::sleep(Duration::from_secs(3));
+            drop(conn);
+        });
+
+        let start = std::time::Instant::now();
+        let err = Client::connect_with_deadlines(
+            socket,
+            Duration::from_secs(5),
+            Duration::from_millis(100),
+        )
+        .err()
+        .expect("handshake against a silent daemon must fail");
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "handshake read did not respect the I/O deadline"
+        );
     }
 }

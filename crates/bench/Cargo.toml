@@ -1,0 +1,25 @@
+[package]
+name = "memeora-bench"
+description = "Offline retrieval benchmark harness for the memeora engine (LongMemEval, LoCoMo)"
+# Dev tooling only: never published, and `publish = false` also keeps it out of
+# the `dist` release artifact matrix.
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+default = []
+# Opt-in real embeddings for `--real-embeddings`. OFF by default: it compiles the
+# ONNX stack and downloads model weights on first use, while the default hashed
+# bag-of-words embedder keeps the bench fully offline and deterministic.
+real-embeddings = ["memeora-core/fastembed"]
+
+[dependencies]
+memeora-core = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

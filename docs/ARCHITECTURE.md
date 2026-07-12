@@ -226,9 +226,10 @@ memeora must be **easy for the open-source community to extend to new harnesses*
 > recall **graph channel** (`graph_search` over shared entities) + bounded recency/proof
 > **boosts**; and the **opt-in local-LLM extractor** (`crate::extract::llm`, OpenAI-compatible,
 > off by default, loopback-allowed/remote-consented, heuristic fallback, graph self-repair)
-> with `EmbeddingProvider::is_local`. **Still deferred:** (a) the benchmark harness;
-> edge decay (Phase 5); LLM belief-phrasing/NLI (Phase 6); and (e)/(f) surface-reach + scale.
-> (Evidence-quote/distinct-source consolidation + freshness landed in Phase 3.)
+> with `EmbeddingProvider::is_local`. **Still deferred:** edge decay (Phase 5); LLM
+> belief-phrasing/NLI (Phase 6); and (e)/(f) surface-reach + scale.
+> (Evidence-quote/distinct-source consolidation + freshness landed in Phase 3; the
+> **benchmark harness landed in the steal-program pass** — see below.)
 
 > **VISION-gap program — Phase 1 (2026-06-21, on `main`).** Bi-temporal valid-time +
 > version chains wired (both were schema-ready but unused). New `crate::temporal` parses a
@@ -266,6 +267,26 @@ memeora must be **easy for the open-source community to extend to new harnesses*
 > (`new | strengthening | stable | weakening | stale`, `dynamics::freshness`) are derived at
 > read time from decay × proof × age and surfaced on `MemoryDto.freshness` (additive). The
 > fuller evidence-density-window model is the documented upgrade path.
+
+> **Steal-program — Phases A–C (2026-07-12, on `main`).** Distilled from a
+> supermemory/MemPalace/hindsight source audit; evals first so every later tuning is
+> measured, not asserted. **(A) Benchmark harness** — new `crates/bench` (`memeora-bench`):
+> LongMemEval/LoCoMo loaders → one in-memory bank per question → the real `search` pipeline →
+> recall_any@k / recall_all@k / NDCG@10, per-question JSONL, a seed-42 dev/held-out split, and
+> a deterministic offline bag-of-words embedder (no network) with `--real-embeddings` (fastembed)
+> opt-in. Retrieval recall, **not** QA accuracy. **(B) Recall hardening** — a **query sanitizer**
+> (`search::query`) strips agent-prepended preamble before it poisons the BM25/temporal legs
+> (MemPalace measured an ~90pp R@10 cliff from exactly this); **interleave fusion** (`Fusion::Interleave`)
+> as an alternative to RRF that seats each signal's top hit rather than averaging a twin into
+> oblivion; an MCP **per-turn recall cache** (generation-invalidated on `remember`/`forget`, so
+> a burst of tool-loop recalls hits the daemon once, never stale across a write); and a
+> **client fail-open deadline** (bounded connect + I/O, `TimedOut` instead of a hang). **(C) Ingest
+> quality** — heuristic **scheduled expiry** (`temporal::parse_future` → `Candidate.expires_at`
+> for future-dated deadlines on Fact/Episode kinds, never Preferences; the existing expiry filter
+> drops them, nothing deleted), and a hook **anti-feedback strip** (`strip_injected_memory` keyed
+> on the shared `INJECT_PREAMBLE` const) so a captured transcript can't re-ingest memeora's own
+> injected context. *(Deferred, pending harness-measured evidence: temporal-coverage bucketing,
+> date-augmented embeddings, fuzzy entity resolution, synthetic recall-decoy docs.)*
 
 **Post-review hardening (applied after a full codebase review):** `upsert` is now an
 edge-preserving in-place UPDATE (delete-then-insert previously cascade-deleted a node's

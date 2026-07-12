@@ -108,14 +108,18 @@ pub fn capture_ack(desc: &HostDescriptor) -> Option<String> {
     (!desc.capture_ack.trim().is_empty()).then(|| desc.capture_ack.clone())
 }
 
+/// Marker line [`format_context`] opens every injected memory block with.
+/// [`strip_injected_memory`] keys on this same constant, so the injector and the
+/// stripper cannot drift apart.
+pub const INJECT_PREAMBLE: &str =
+    "The following is persistent memory about this user/project. Use it naturally; don't force it.";
+
 /// Format a scope's profile into injectable text, or `None` if it's empty.
 pub fn format_context(statics: &[MemoryDto], dynamics: &[MemoryDto]) -> Option<String> {
     if statics.is_empty() && dynamics.is_empty() {
         return None;
     }
-    let mut out = String::from(
-        "The following is persistent memory about this user/project. Use it naturally; don't force it.\n",
-    );
+    let mut out = format!("{INJECT_PREAMBLE}\n");
     for m in statics.iter().chain(dynamics.iter()) {
         out.push_str(&format!("- [{}] {}\n", m.kind, m.content));
     }
@@ -147,7 +151,7 @@ pub fn transcript_to_text(jsonl: &str, max_turns: usize) -> String {
         if role != "user" && role != "assistant" {
             continue;
         }
-        let text = extract_text(&value);
+        let text = strip_injected_memory(&extract_text(&value));
         if text.trim().is_empty() {
             continue;
         }
@@ -155,6 +159,43 @@ pub fn transcript_to_text(jsonl: &str, max_turns: usize) -> String {
     }
     let start = turns.len().saturating_sub(max_turns);
     turns[start..].join("\n")
+}
+
+/// Remove memeora's own injected memory block from captured text, so capture never
+/// re-ingests what the hook itself injected (a feedback loop: past memories would be
+/// extracted again as "new" and compound/echo across sessions).
+///
+/// Keys on the [`INJECT_PREAMBLE`] marker line emitted by [`format_context`] —
+/// drops that line (injection can land mid-line when hosts join content blocks, so
+/// any genuine prefix before the marker is kept) plus the immediately following run
+/// of `- [kind] ...` bullet lines. Everything else, including genuine text that
+/// merely mentions memory or contains bullets, passes through untouched.
+pub fn strip_injected_memory(text: &str) -> String {
+    if !text.contains(INJECT_PREAMBLE) {
+        return text.to_string();
+    }
+    let mut kept: Vec<&str> = Vec::new();
+    let mut lines = text.lines().peekable();
+    while let Some(line) = lines.next() {
+        match line.find(INJECT_PREAMBLE) {
+            Some(at) => {
+                let prefix = line[..at].trim_end();
+                if !prefix.is_empty() {
+                    kept.push(prefix);
+                }
+                while lines
+                    .next_if(|l| l.trim_start().starts_with("- ["))
+                    .is_some()
+                {}
+            }
+            None => kept.push(line),
+        }
+    }
+    let mut out = kept.join("\n");
+    if text.ends_with('\n') && !out.is_empty() {
+        out.push('\n');
+    }
+    out
 }
 
 /// `message.content` (or top-level `content`) from a transcript entry, if present.
@@ -527,5 +568,64 @@ mod tests {
     #[test]
     fn format_context_is_none_when_empty() {
         assert!(format_context(&[], &[]).is_none());
+    }
+
+    fn mem(kind: &str, content: &str) -> MemoryDto {
+        MemoryDto {
+            id: "m1".into(),
+            content: content.into(),
+            kind: kind.into(),
+            strength: 1.0,
+            created_at: 0,
+            score: None,
+            freshness: None,
+        }
+    }
+
+    /// The injected block (built via `format_context`, so this can't drift from the
+    /// real injection text) must not survive capture — the anti-feedback-loop.
+    #[test]
+    fn capture_strips_injected_memory_block() {
+        let injected = format_context(
+            &[mem("preference", "prefers rust")],
+            &[mem("fact", "works on memeora")],
+        )
+        .unwrap();
+        // Injection prepended to a genuine user message in the same turn.
+        let mixed = serde_json::json!({
+            "message": { "role": "user", "content": format!("{injected}please fix the login bug") }
+        })
+        .to_string();
+        // A turn that is *only* the injection must vanish entirely.
+        let pure = serde_json::json!({
+            "message": { "role": "user", "content": injected }
+        })
+        .to_string();
+        let reply =
+            r#"{"message":{"role":"assistant","content":[{"type":"text","text":"on it"}]}}"#;
+        let jsonl = [pure, mixed, reply.to_string()].join("\n");
+        assert_eq!(
+            transcript_to_text(&jsonl, 40),
+            "user: please fix the login bug\nassistant: on it"
+        );
+    }
+
+    #[test]
+    fn strip_injected_memory_keeps_prefix_before_mid_line_marker() {
+        let injected = format_context(&[mem("fact", "likes fish")], &[]).unwrap();
+        // Hosts that join content blocks with spaces can land the marker mid-line.
+        let text = format!("real question first {injected}");
+        assert_eq!(strip_injected_memory(&text), "real question first\n");
+    }
+
+    #[test]
+    fn strip_injected_memory_leaves_ordinary_text_untouched() {
+        // No marker → byte-identical, even when the text talks about memory or
+        // happens to contain `- [kind]`-shaped bullets.
+        let text =
+            "user asked about persistent memory features\n- [preference] looks like a bullet\n";
+        assert_eq!(strip_injected_memory(text), text);
+        let jsonl = r#"{"message":{"role":"user","content":"tell me about memory"}}"#;
+        assert_eq!(transcript_to_text(jsonl, 40), "user: tell me about memory");
     }
 }

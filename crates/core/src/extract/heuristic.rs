@@ -54,6 +54,10 @@ const EPISODE_MARKERS: &[&str] = &[
     "last week",
     "earlier",
     " ago",
+    // Forward-looking cues — a future event is still an episode, and its deadline
+    // drives `expires_at` (scheduled expiry) so it drops from recall once stale.
+    "tomorrow",
+    "next week",
     "i met",
     "we met",
     "i talked",
@@ -132,15 +136,23 @@ impl HeuristicExtractor {
         // Record when the statement says the event occurred (valid-time), if it
         // carries a temporal cue — distinct from when it was learned. Parse the same
         // normalized text the markers matched (temporal cues are ASCII too).
-        let (occurred_start, occurred_end) =
-            match crate::temporal::parse(&lower, crate::store::now_unix()) {
-                Some((start, end)) => (Some(start), end),
-                None => (None, None),
-            };
+        let now = crate::store::now_unix();
+        let (occurred_start, occurred_end) = match crate::temporal::parse(&lower, now) {
+            Some((start, end)) => (Some(start), end),
+            None => (None, None),
+        };
+        // A forward-looking deadline ("exam tomorrow", "due 2026-08-01") schedules
+        // expiry just past the named date, so recall drops the memory once stale —
+        // the expiry filter excludes it, nothing is deleted. Only time-bound kinds:
+        // a stable preference must never expire, however it is phrased.
+        let expires_at = match kind {
+            MemoryKind::Preference => None,
+            MemoryKind::Fact | MemoryKind::Episode => crate::temporal::parse_future(&lower, now),
+        };
         Some(Candidate {
             content: sentence.to_string(),
             kind,
-            expires_at: None,
+            expires_at,
             occurred_start,
             occurred_end,
             confidence,
@@ -315,6 +327,44 @@ mod tests {
         assert_eq!(c.len(), 2);
         assert!(c.iter().any(|x| x.content.contains("src/main.rs")));
         assert!(c.iter().any(|x| x.content.contains("cargo build")));
+    }
+
+    #[test]
+    fn future_deadline_sets_expiry() {
+        let c = extract("The exam is tomorrow at the campus");
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].kind, MemoryKind::Episode);
+        let expiry = c[0].expires_at.expect("a future deadline schedules expiry");
+        assert!(expiry > crate::store::now_unix());
+    }
+
+    #[test]
+    fn fact_with_future_due_date_sets_expiry() {
+        let c = extract("The deadline for the report is 2999-01-15");
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].kind, MemoryKind::Fact);
+        assert!(c[0].expires_at.is_some());
+    }
+
+    #[test]
+    fn preference_never_expires() {
+        // No temporal cue at all.
+        let c = extract("I prefer dark mode in my editor");
+        assert!(c[0].expires_at.is_none());
+        // Even phrased with a future cue, a preference is durable.
+        let c = extract("I prefer to review PRs tomorrow morning");
+        assert_eq!(c[0].kind, MemoryKind::Preference);
+        assert!(c[0].expires_at.is_none());
+    }
+
+    #[test]
+    fn past_episode_never_expires() {
+        let c = extract("we shipped it yesterday");
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].kind, MemoryKind::Episode);
+        assert!(c[0].expires_at.is_none());
+        // The past cue still records valid-time as before.
+        assert!(c[0].occurred_start.is_some());
     }
 
     #[test]

@@ -74,6 +74,7 @@ builds a knowledge graph, and recalls the right context at the right time. It's 
 | `crates/mcp` | `rmcp` MCP server (recall / remember / context / list / forget) |
 | `crates/hook` | `memeora-hook` descriptor-driven command-hook library (its binary ships from `crates/cli`) |
 | `crates/cli` | `memeora` CLI (doctor / add / ingest / recall / context / list / forget / scope / dashboard / models) — also the package that ships all four binaries |
+| `crates/bench` | `memeora-bench` — offline LongMemEval/LoCoMo retrieval harness (recall@k / NDCG@10, seed-42 dev split) |
 | `dashboard/` | Svelte 5 + Vite + Sigma.js graph UI, embedded into the daemon via `rust-embed` |
 | `sdk/ts/` | `@memeora/client` — TypeScript client over the IPC protocol |
 | `adapters/_descriptors/` | data-driven host descriptors (claude / codex / antigravity) |
