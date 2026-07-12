@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, ValueEnum};
 use memeora_client::Client;
-use memeora_proto::DEFAULT_SOCKET;
+use memeora_proto::resolve_socket;
 use serde_json::Value;
 
 use crate::descriptor::{self, HostDescriptor};
@@ -95,7 +95,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     let payload: Value = serde_json::from_str(&input).unwrap_or(Value::Null);
 
     let scope = resolve_scope(&desc, &payload);
-    let socket = args.socket.unwrap_or_else(|| DEFAULT_SOCKET.to_string());
+    let socket = resolve_socket(args.socket);
 
     if args.event.is_inject() {
         if should_inject(&desc, &payload)

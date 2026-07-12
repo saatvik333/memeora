@@ -24,6 +24,14 @@ yarn.lock
 *.db
 *.db-wal
 *.db-shm
+# fastembed downloads model weights here (repo-root cwd) when bench/tools run
+# with real embeddings — large ONNX blobs, never committed
+.fastembed_cache/
+
+# benchmark harness inputs (downloaded datasets) + outputs (per-question JSONL);
+# regenerable, not repo content — see crates/bench/README.md
+/data/
+/results/
 
 # Env & local
 .env

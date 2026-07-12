@@ -17,7 +17,7 @@ use memeora_core::{
     CachingEmbedder, EmbeddingProvider, Extractor, HeuristicExtractor, LlmConfig, LlmExtractor,
     SqliteStore,
 };
-use memeora_proto::{DEFAULT_SOCKET, PROTOCOL_VERSION};
+use memeora_proto::PROTOCOL_VERSION;
 use tokio::sync::broadcast;
 
 use crate::{Engine, dashboard, serve};
@@ -207,7 +207,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         _ => engine,
     };
 
-    let socket = std::env::var("MEMEORA_SOCKET").unwrap_or_else(|_| DEFAULT_SOCKET.to_string());
+    let socket = memeora_proto::resolve_socket(None);
 
     // Start the local dashboard (optional) on its own thread + runtime, using a
     // second read-only connection so it never contends with the IPC writer. A

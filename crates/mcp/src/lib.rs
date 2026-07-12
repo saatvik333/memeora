@@ -27,8 +27,7 @@ use std::time::{Duration, Instant};
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
-        let socket = std::env::var("MEMEORA_SOCKET")
-            .unwrap_or_else(|_| memeora_proto::DEFAULT_SOCKET.to_string());
+        let socket = memeora_proto::resolve_socket(None);
         let service = MemoryServer::new(socket).serve(stdio()).await?;
         service.waiting().await?;
         Ok(())

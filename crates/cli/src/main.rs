@@ -11,7 +11,7 @@ use clap::{Parser, Subcommand};
 use memeora_client::Client;
 use memeora_core::container_tag::project_tag;
 use memeora_core::models;
-use memeora_proto::DEFAULT_SOCKET;
+use memeora_proto::resolve_socket;
 
 /// Default address the daemon serves the dashboard on (see `memeora-daemon`).
 const DEFAULT_DASHBOARD_ADDR: &str = "127.0.0.1:7878";
@@ -244,7 +244,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         return run_models(cmd);
     }
 
-    let socket = cli.socket.unwrap_or_else(|| DEFAULT_SOCKET.to_string());
+    let socket = resolve_socket(cli.socket);
     let mut client = Client::connect(&socket).map_err(|e| {
         format!("cannot reach the daemon at {socket}: {e}\nis `memeora-daemon` running?")
     })?;

@@ -82,6 +82,22 @@ pub fn build_name(socket: &str) -> std::io::Result<Name<'_>> {
 /// (Linux abstract namespace / Windows named pipe).
 pub const DEFAULT_SOCKET: &str = "memeora-daemon.sock";
 
+/// Resolve the daemon socket name every peer must agree on: an `explicit` override
+/// (a CLI `--socket` / hook arg) wins, else `$MEMEORA_SOCKET`, else [`DEFAULT_SOCKET`].
+///
+/// Centralized here so the daemon (server) and every client (CLI, hook, MCP) share
+/// one precedence rule — set `MEMEORA_SOCKET` and they all follow it, rather than the
+/// CLI silently falling back to the default while the daemon binds elsewhere.
+pub fn resolve_socket(explicit: Option<String>) -> String {
+    explicit
+        .or_else(|| {
+            std::env::var("MEMEORA_SOCKET")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| DEFAULT_SOCKET.to_string())
+}
+
 /// A scope/container identifier (e.g. a `memeora_user_*` / `repo_*` tag).
 pub type Scope = String;
 
@@ -422,6 +438,17 @@ mod tests {
         let json = r#"{"type":"hello","protocol_version":1,"server_version":"0.0.0","capabilities":[],"future":true}"#;
         let resp: Response = serde_json::from_str(json).unwrap();
         assert!(matches!(resp, Response::Hello { .. }));
+    }
+
+    #[test]
+    fn resolve_socket_prefers_explicit_over_env_and_default() {
+        // An explicit override always wins, regardless of env (deterministic path).
+        assert_eq!(resolve_socket(Some("/tmp/x.sock".into())), "/tmp/x.sock");
+        // With no override, it falls through to $MEMEORA_SOCKET, else DEFAULT_SOCKET.
+        // (Env case is exercised end-to-end; env mutation in-test is unsafe under 2024.)
+        if std::env::var("MEMEORA_SOCKET").is_err() {
+            assert_eq!(resolve_socket(None), DEFAULT_SOCKET);
+        }
     }
 
     #[test]
