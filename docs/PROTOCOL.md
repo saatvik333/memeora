@@ -28,10 +28,25 @@ Requests are a serde-tagged enum on `"op"`; responses on `"type"`:
 | `add` | `added` | `add` |
 | `recall` | `memories` | `recall` |
 | `context` | `context` | `context` |
+| `bundle` | `bundle` | `bundle` |
 | `list` | `memories` | `list` |
 | `forget` | `forgotten` | `forget` |
+| `consolidate` | `consolidated` | `consolidate` |
 
 Any request can also come back as `{"type":"error","message":"…"}`.
+
+`bundle` is a one-round-trip convenience: `{"op":"bundle","scope":"…","query":"…","k":10,"max_tokens":null}`
+returns `{"type":"bundle","statics":[…],"dynamics":[…],"memories":[…]}` — the scope
+profile (statics + dynamics, as `context`) plus the query's recall hits (as `recall`),
+with any recall hit already in the profile removed (priority static > dynamic > search).
+Additive + capability-gated (`bundle`); older daemons simply don't advertise it.
+
+`consolidate` distils a scope's near-duplicate memories into distinct-source-proofed
+observations: `{"op":"consolidate","scope":"…"}` returns
+`{"type":"consolidated","observations":N,"sources_linked":M}` (observations written,
+`(observation, source)` links recorded). Idempotent — re-running converges. The belief
+text is synthesized by the no-LLM passthrough (longest member verbatim) unless the daemon
+was started with an allowed LLM endpoint. Additive + capability-gated (`consolidate`).
 
 ### Optional, capability-gated fields
 
@@ -72,7 +87,7 @@ The first message on a connection is `hello`:
 { "op": "hello", "protocol_version": 1 }
 // daemon → client
 { "type": "hello", "protocol_version": 1, "server_version": "0.1.0",
-  "capabilities": ["ingest","add","recall","context","list","forget","token_budget","evidence"] }
+  "capabilities": ["ingest","add","recall","context","list","forget","token_budget","evidence","bundle","consolidate"] }
 ```
 
 - `protocol_version` — the **wire** version. A client must refuse a daemon whose

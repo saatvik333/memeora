@@ -41,6 +41,12 @@ pub mod capability {
     /// the distinct-source evidence model — repeated corroboration from one source can't
     /// inflate proof, and recalled memories carry a `freshness` trend.
     pub const EVIDENCE: &str = "evidence";
+    /// Single-call context bundle ([`Request::Bundle`]): a scope's profile
+    /// (statics + dynamics) plus the query's recall results in one round-trip.
+    pub const BUNDLE: &str = "bundle";
+    /// On-demand consolidation ([`Request::Consolidate`]): distil a scope's
+    /// near-duplicate memories into distinct-source-proofed observations.
+    pub const CONSOLIDATE: &str = "consolidate";
 
     /// The full set a current daemon supports. Returned by the daemon in its
     /// handshake; kept here so client and server agree on the canonical list.
@@ -53,6 +59,8 @@ pub mod capability {
         FORGET,
         TOKEN_BUDGET,
         EVIDENCE,
+        BUNDLE,
+        CONSOLIDATE,
     ];
 }
 
@@ -131,6 +139,22 @@ pub enum Request {
         /// Scope to summarize.
         scope: Scope,
     },
+    /// Single-call context bundle: the scope's profile (statics + dynamics) **and**
+    /// the query's recall results, in one round-trip (see [`Response::Bundle`]).
+    /// Additive; gate on the `bundle` capability. See [`capability::BUNDLE`].
+    Bundle {
+        /// Scope to bundle.
+        scope: Scope,
+        /// Query text for the recall portion.
+        query: String,
+        /// Max recall results.
+        k: usize,
+        /// Optional token budget for the recall portion — same semantics as the
+        /// `max_tokens` field on [`Request::Recall`]. Additive + defaulted, so older
+        /// clients omit it; gate on the `token_budget` capability.
+        #[serde(default)]
+        max_tokens: Option<usize>,
+    },
     /// List the latest memories in a scope.
     List {
         /// Scope to list.
@@ -142,6 +166,12 @@ pub enum Request {
     Forget {
         /// Memory id.
         id: String,
+    },
+    /// Consolidate a scope: cluster near-duplicate memories into distinct-source-proofed
+    /// observations. Additive; gate on the `consolidate` capability.
+    Consolidate {
+        /// Scope to consolidate.
+        scope: Scope,
     },
 }
 
@@ -187,8 +217,26 @@ pub enum Response {
         /// Recent episodes.
         dynamics: Vec<MemoryDto>,
     },
+    /// Result of an [`Request::Bundle`]: profile + recall, deduped by memory id with
+    /// priority static > dynamic > search (a memory in `statics` never reappears in
+    /// `dynamics`/`memories`; one in `dynamics` never reappears in `memories`).
+    Bundle {
+        /// Stable facts and preferences.
+        statics: Vec<MemoryDto>,
+        /// Recent episodes.
+        dynamics: Vec<MemoryDto>,
+        /// Query recall hits not already present in `statics`/`dynamics`.
+        memories: Vec<MemoryDto>,
+    },
     /// Acknowledgement for an [`Request::Forget`].
     Forgotten,
+    /// Result of an [`Request::Consolidate`].
+    Consolidated {
+        /// Observations written (one per near-duplicate cluster, upserts included).
+        observations: usize,
+        /// Total (observation, source-memory) links recorded.
+        sources_linked: usize,
+    },
     /// The request failed.
     Error {
         /// Human-readable error message.
@@ -250,6 +298,12 @@ mod tests {
                 k: 5,
                 max_tokens: Some(2000),
             },
+            Request::Bundle {
+                scope: "repo_memeora".into(),
+                query: "language".into(),
+                k: 8,
+                max_tokens: Some(1500),
+            },
             Request::Forget { id: "m1".into() },
         ];
         for req in &reqs {
@@ -271,6 +325,46 @@ mod tests {
             }],
         };
         assert_eq!(roundtrip_response(&resp), resp);
+    }
+
+    #[test]
+    fn bundle_response_roundtrips() {
+        let resp = Response::Bundle {
+            statics: vec![MemoryDto {
+                id: "s1".into(),
+                content: "I prefer rust".into(),
+                kind: "preference".into(),
+                strength: 1.0,
+                created_at: 1_700_000_000,
+                score: None,
+                freshness: Some("stable".into()),
+            }],
+            dynamics: vec![],
+            memories: vec![MemoryDto {
+                id: "m1".into(),
+                content: "fixed the login bug".into(),
+                kind: "episode".into(),
+                strength: 0.8,
+                created_at: 1_700_000_100,
+                score: Some(0.42),
+                freshness: None,
+            }],
+        };
+        assert_eq!(roundtrip_response(&resp), resp);
+    }
+
+    #[test]
+    fn bundle_without_max_tokens_is_back_compatible() {
+        // An older client's Bundle (no max_tokens) must still parse — additive field,
+        // defaulted, no PROTOCOL_VERSION bump.
+        let json = r#"{"op":"bundle","scope":"s","query":"q","k":8}"#;
+        match serde_json::from_str::<Request>(json).unwrap() {
+            Request::Bundle { k, max_tokens, .. } => {
+                assert_eq!(k, 8);
+                assert!(max_tokens.is_none());
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
     }
 
     #[test]

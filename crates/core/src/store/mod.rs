@@ -172,6 +172,31 @@ impl EdgeKind {
     }
 }
 
+/// A consolidated observation: one canonical belief distilled from a cluster of
+/// near-duplicate memories, corroborated by a set of distinct source memories.
+///
+/// The observation layer sits one level above [`Memory`]: [`crate::consolidate`]
+/// groups a scope's near-duplicate memories and writes one observation per cluster.
+/// `proof_count` is a denormalized `COUNT(DISTINCT source_memory_id)` over the
+/// observation's source set (mirroring the per-memory evidence/proof model), refreshed
+/// by [`add_observation_source`](VectorStore::add_observation_source).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Observation {
+    /// Stable, deterministic id (keyed on the cluster's canonical member — see
+    /// [`crate::consolidate`] — so re-consolidating the same memories converges).
+    pub id: String,
+    /// Scope (see [`crate::container_tag`]).
+    pub container_tag: String,
+    /// The canonical belief text (the synthesizer's output for the cluster).
+    pub content: String,
+    /// Distinct source memories corroborating this observation.
+    pub proof_count: u32,
+    /// Creation time (Unix seconds); preserved across re-consolidation.
+    pub created_at: i64,
+    /// Last time the observation's content or sources changed (Unix seconds).
+    pub updated_at: i64,
+}
+
 /// Summary of one scope/container, for the dashboard's spaces switcher.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScopeInfo {
@@ -250,9 +275,64 @@ pub trait VectorStore {
         Ok(())
     }
 
+    /// Insert or update a consolidated [`Observation`] (matched by `id`). On update the
+    /// original `created_at` is preserved; `content`, `container_tag`, `proof_count`, and
+    /// `updated_at` are refreshed. `proof_count` is authoritatively (re)set by
+    /// [`add_observation_source`](VectorStore::add_observation_source); the value written
+    /// here is a hint. Default: no-op, for stores without an observation table.
+    fn upsert_observation(&mut self, _observation: &Observation) -> Result<()> {
+        Ok(())
+    }
+
+    /// List observations in `container_tag`, most-recently-updated first, up to `limit`.
+    /// Default: empty, for stores without an observation table.
+    fn list_observations(&self, _container_tag: &str, _limit: usize) -> Result<Vec<Observation>> {
+        Ok(Vec::new())
+    }
+
+    /// Record `source_memory_id` as a distinct source for `observation_id`: insert into
+    /// the source set (set-union via the composite PK — a repeated source is a no-op) and
+    /// refresh the observation's `proof_count` to the distinct-source count. This mirrors
+    /// [`record_evidence`](VectorStore::record_evidence) one level up: independent sources
+    /// raise proof, re-linking a known source does not — which is what makes re-running
+    /// consolidation idempotent. Default: no-op, for stores without an observation table.
+    fn add_observation_source(
+        &mut self,
+        _observation_id: &str,
+        _source_memory_id: &str,
+    ) -> Result<()> {
+        Ok(())
+    }
+
     /// Add a directed `from_id --kind--> to_id` edge. Idempotent (duplicate edges
     /// of the same kind are ignored).
     fn add_edge(&mut self, from_id: &str, to_id: &str, kind: EdgeKind) -> Result<()>;
+
+    /// Hebbian potentiation of graph edges co-activated during recall (Phase E). For each
+    /// unordered `(a, b)` pair, bump every edge between `a` and `b` (either direction):
+    /// `strength += `[`EDGE_POTENTIATION_DELTA`] capped at [`STRENGTH_MAX`], grow
+    /// `stability` by [`EDGE_STABILITY_DELTA`] **only** when this activation is
+    /// ≥ [`SPACING_SECS`] after the last (Cepeda spacing — rapid bursts don't build
+    /// durability), and stamp `last_activated = now`. Unknown pairs are a no-op. Default:
+    /// no-op, for stores without edge dynamics.
+    ///
+    /// **Write path only.** This is the mirror of [`reinforce`](VectorStore::reinforce) for
+    /// edges: it mutates, so — like every write — it belongs to the sole-writer daemon.
+    /// [`graph_search`](VectorStore::graph_search) runs on `&self` (a read) and must never
+    /// call it; the daemon collects the edges a recall traversed and potentiates them on
+    /// the recall write-back, off the read path.
+    ///
+    /// [`EDGE_POTENTIATION_DELTA`]: crate::dynamics::EDGE_POTENTIATION_DELTA
+    /// [`EDGE_STABILITY_DELTA`]: crate::dynamics::EDGE_STABILITY_DELTA
+    /// [`STRENGTH_MAX`]: crate::dynamics::STRENGTH_MAX
+    /// [`SPACING_SECS`]: crate::dynamics::SPACING_SECS
+    // ponytail: the recall write-back that feeds this pairs list lives in the daemon's
+    // recall vertical (out of this crate's file scope) — wire graph_search's surfaced
+    // seed→neighbor edges into a potentiate_edges call there, alongside the existing
+    // reinforce write-back.
+    fn potentiate_edges(&mut self, _pairs: &[(String, String)]) -> Result<()> {
+        Ok(())
+    }
 
     /// All outgoing edges from `id`.
     fn edges_from(&self, id: &str) -> Result<Vec<Relationship>>;
@@ -313,7 +393,10 @@ pub trait VectorStore {
     /// Graph recall channel: latest memories in `container_tag` that share canonical
     /// entities with any of `seed_ids` (seeds excluded), ranked by a bounded activation
     /// score — a saturating shared-entity term plus a bonus when the memory is also
-    /// directly graph-linked to a seed — best first, capped at `k`. Default: empty.
+    /// directly graph-linked to a seed. The edge bonus is weighted by the edge's
+    /// idle-decayed strength ([`crate::dynamics::decayed_edge_strength`]), so a fresh,
+    /// often-reinforced relationship activates more than a long-idle one. Best first,
+    /// capped at `k`. Default: empty.
     fn graph_search(
         &self,
         _container_tag: &str,

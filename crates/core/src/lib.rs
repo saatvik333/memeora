@@ -7,6 +7,7 @@
 //!
 //! Embeddings, extraction, and ranking are added in later steps (see `docs/ARCHITECTURE.md`).
 
+pub mod consolidate;
 pub mod container_tag;
 pub mod db;
 pub mod dynamics;
@@ -22,6 +23,10 @@ pub mod search;
 pub mod store;
 pub mod temporal;
 
+pub use consolidate::{
+    ConsolidationOutcome, ConsolidationParams, ObservationSynthesizer, PassthroughSynthesizer,
+    consolidate,
+};
 pub use dynamics::{decayed_strength, freshness};
 pub use embed::{CachingEmbedder, EmbeddingProvider, EmbeddingSpace};
 pub use entity::extract_entities;
@@ -36,8 +41,8 @@ pub use profile::{Profile, ProfileCache, ProfileParams, build_profile};
 pub use search::{RerankHit, Reranker, SearchMode, SearchParams, rerank_memories, search};
 pub use store::sqlite::SqliteStore;
 pub use store::{
-    EdgeKind, GraphData, Memory, MemoryKind, Relationship, ScopeInfo, ScoredMemory, VectorStore,
-    now_unix,
+    EdgeKind, GraphData, Memory, MemoryKind, Observation, Relationship, ScopeInfo, ScoredMemory,
+    VectorStore, now_unix,
 };
 
 /// Crate version, surfaced by the daemon's capability handshake.

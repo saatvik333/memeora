@@ -10,7 +10,9 @@ use std::error::Error;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
+use memeora_core::consolidate::LlmSynthesizer;
 use memeora_core::embed::fastembed::FastEmbedder;
+use memeora_core::search::fastembed::FastEmbedReranker;
 use memeora_core::{
     CachingEmbedder, EmbeddingProvider, Extractor, HeuristicExtractor, LlmConfig, LlmExtractor,
     SqliteStore,
@@ -79,6 +81,18 @@ fn model_download_allowed() -> bool {
         .unwrap_or(false)
 }
 
+/// Explicit opt-in to the local cross-encoder reranker (`MEMEORA_RERANK`, off by
+/// default). When on, recall over-fetches candidates and re-scores them jointly with
+/// BGE-reranker-base — a quality upgrade at extra CPU and a one-time model download.
+fn rerank_enabled() -> bool {
+    std::env::var("MEMEORA_RERANK")
+        .map(|v| {
+            let v = v.trim();
+            !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(false)
+}
+
 /// Load the model + store once, optionally start the dashboard, then serve IPC
 /// (blocks for the process lifetime — the writer-actor owns the sole DB write conn).
 pub fn run() -> Result<(), Box<dyn Error>> {
@@ -128,7 +142,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     // Local, no-API-key embedder (downloads weights to the cache on first run, only
     // when allowed by the consent check above), wrapped in a content-addressed cache
     // so repeated text (the common case across turns) skips re-embedding.
-    let embedder = CachingEmbedder::new(FastEmbedder::bge_small(Some(model_cache))?);
+    let embedder = CachingEmbedder::new(FastEmbedder::bge_small(Some(model_cache.clone()))?);
     let dim = embedder.dim();
     let store = SqliteStore::open(&db_path, dim)?;
 
@@ -158,6 +172,40 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         None => Box::new(HeuristicExtractor::default()),
     };
     let engine = Engine::new(store, Box::new(embedder), extractor).with_events(events_tx.clone());
+
+    // Optional cross-encoder reranker (opt-in via MEMEORA_RERANK): a recall quality
+    // upgrade, never a requirement. If the model can't load — offline first run, no
+    // cache, etc. — log and serve without it rather than failing the daemon. Uses the
+    // same cache dir as the embedder; first-run fetch needs MEMEORA_ALLOW_MODEL_DOWNLOAD.
+    let engine = if rerank_enabled() {
+        match FastEmbedReranker::bge_base(Some(model_cache)) {
+            Ok(reranker) => {
+                eprintln!("memeora-daemon: cross-encoder reranker enabled (BGE-reranker-base)");
+                engine.with_reranker(Box::new(reranker))
+            }
+            Err(e) => {
+                eprintln!(
+                    "memeora-daemon: MEMEORA_RERANK set but the reranker failed to load ({e}); \
+                     serving without reranking"
+                );
+                engine
+            }
+        }
+    } else {
+        engine
+    };
+
+    // Consolidation belief-text synthesizer: the same LLM config that gates the
+    // extractor also gates this. When enabled+allowed, the LLM synthesizer is used
+    // (it fails open to the passthrough on any error, so it's never a hard dependency);
+    // otherwise consolidation uses the no-LLM passthrough (longest member verbatim).
+    let engine = match LlmConfig::from_env() {
+        Some(cfg) if cfg.is_allowed() => {
+            eprintln!("memeora-daemon: LLM observation synthesizer enabled");
+            engine.with_synthesizer(Box::new(LlmSynthesizer::new(cfg)))
+        }
+        _ => engine,
+    };
 
     let socket = std::env::var("MEMEORA_SOCKET").unwrap_or_else(|_| DEFAULT_SOCKET.to_string());
 

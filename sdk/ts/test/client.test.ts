@@ -172,6 +172,37 @@ test("ingest forwards source; omits it when unset", async () => {
   c.close();
 });
 
+test("bundle forwards inputs and returns profile + recall; omits max_tokens when unset", async () => {
+  const seen: any[] = [];
+  const p = await startStub(
+    withHello((req, s) => {
+      if (req.op === "bundle") {
+        seen.push(req);
+        s.write(
+          frame({
+            type: "bundle",
+            statics: [{ id: "s1", content: "prefers rust", kind: "preference", strength: 1, created_at: 1 }],
+            dynamics: [{ id: "d1", content: "shipped bundle", kind: "episode", strength: 1, created_at: 2 }],
+            memories: [{ id: "m1", content: "hi", kind: "fact", strength: 1, created_at: 3, score: 0.5 }],
+          }),
+        );
+      }
+    }),
+  );
+  const c = await Client.connect(p);
+  const bundled = await c.bundle("s", "rust", 8, 1500);
+  expect(bundled.statics[0]!.id).toBe("s1");
+  expect(bundled.dynamics[0]!.kind).toBe("episode");
+  expect(bundled.memories[0]!.id).toBe("m1");
+  expect(seen[0].query).toBe("rust");
+  expect(seen[0].k).toBe(8);
+  expect(seen[0].max_tokens).toBe(1500);
+  // Omitted budget must not appear on the wire (additive field, older daemons).
+  await c.bundle("s", "rust", 8);
+  expect("max_tokens" in seen[1]).toBe(false);
+  c.close();
+});
+
 test("concurrent calls resolve in FIFO order", async () => {
   const p = await startStub(
     withHello((req, s) => {

@@ -39,6 +39,7 @@ interface IngestedResponse { type: "ingested"; added: number; reinforced: number
 interface AddedResponse { type: "added"; id: string }
 interface MemoriesResponse { type: "memories"; memories: MemoryDto[] }
 interface ContextResponse { type: "context"; statics: MemoryDto[]; dynamics: MemoryDto[] }
+interface BundleResponse { type: "bundle"; statics: MemoryDto[]; dynamics: MemoryDto[]; memories: MemoryDto[] }
 interface ForgottenResponse { type: "forgotten" }
 interface ErrorResponse { type: "error"; message: string }
 
@@ -48,6 +49,7 @@ type Response =
   | AddedResponse
   | MemoriesResponse
   | ContextResponse
+  | BundleResponse
   | ForgottenResponse
   | ErrorResponse;
 
@@ -181,6 +183,23 @@ export class Client {
   async context(scope: string): Promise<{ statics: MemoryDto[]; dynamics: MemoryDto[] }> {
     const r = await this.call({ op: "context", scope });
     if (r.type === "context") return { statics: r.statics, dynamics: r.dynamics };
+    throw this.unexpected(r);
+  }
+
+  /**
+   * Single-call context bundle: the scope's profile (statics, dynamics) **and** the
+   * query's recall hits, in one round-trip. Deduped by id — a profile memory never
+   * reappears in `memories`. Gate on the `bundle` capability; `maxTokens` budgets the
+   * recall portion like {@link recall}.
+   */
+  async bundle(
+    scope: string,
+    query: string,
+    k = 10,
+    maxTokens?: number,
+  ): Promise<{ statics: MemoryDto[]; dynamics: MemoryDto[]; memories: MemoryDto[] }> {
+    const r = await this.call({ op: "bundle", scope, query, k, max_tokens: maxTokens });
+    if (r.type === "bundle") return { statics: r.statics, dynamics: r.dynamics, memories: r.memories };
     throw this.unexpected(r);
   }
 

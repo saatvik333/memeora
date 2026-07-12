@@ -8,8 +8,8 @@ use crate::db;
 use crate::dynamics;
 use crate::error::{Error, Result};
 use crate::store::{
-    EdgeKind, GraphData, Memory, MemoryKind, Relationship, ScopeInfo, ScoredMemory, VectorStore,
-    now_unix,
+    EdgeKind, GraphData, Memory, MemoryKind, Observation, Relationship, ScopeInfo, ScoredMemory,
+    VectorStore, now_unix,
 };
 
 /// SQLite store. Owns one connection (the daemon keeps a single writer; see ARCHITECTURE.md).
@@ -210,8 +210,12 @@ impl SqliteStore {
 ///
 /// FTS5 `MATCH` is a query language, so passing raw text (with `:`, `-`, `"`, `*`,
 /// `NEAR`, …) risks a syntax error that would fail the whole search. We extract
-/// alphanumeric tokens and quote each as a phrase (implicit AND), which can never
-/// be malformed. Returns `None` when there are no usable tokens.
+/// alphanumeric tokens, quote each as a phrase (never malformed), and join with
+/// **`OR`**: as the lexical leg of an RRF hybrid this should maximize recall — a
+/// memory matching *any* term is a candidate, BM25 ranks by term rarity/overlap so
+/// spurious single-term hits sink, and the dense leg supplies precision. (Implicit
+/// AND would require every term in one memory, returning nothing for the common case
+/// where terms are spread across memories.) Returns `None` when there are no tokens.
 fn fts5_match(query: &str) -> Option<String> {
     let tokens: Vec<String> = query
         .split(|c: char| !c.is_alphanumeric())
@@ -219,7 +223,7 @@ fn fts5_match(query: &str) -> Option<String> {
         // Tokens are alphanumeric, so there are no quotes to escape.
         .map(|t| format!("\"{t}\""))
         .collect();
-    (!tokens.is_empty()).then(|| tokens.join(" "))
+    (!tokens.is_empty()).then(|| tokens.join(" OR "))
 }
 
 /// The persisted embedding dim (`meta.embedding_dim`), or `None` before first init.
@@ -514,12 +518,127 @@ impl VectorStore for SqliteStore {
         Ok(())
     }
 
-    fn add_edge(&mut self, from_id: &str, to_id: &str, kind: EdgeKind) -> Result<()> {
+    fn upsert_observation(&mut self, observation: &Observation) -> Result<()> {
+        // ON CONFLICT keeps the original `created_at` (absent from the SET list) but
+        // refreshes content/scope/proof_count/updated_at, so re-consolidating the same
+        // cluster updates in place rather than duplicating. `proof_count` here is a hint;
+        // `add_observation_source` recomputes it authoritatively from the source set.
         self.conn.execute(
-            "INSERT OR IGNORE INTO relationships (from_id, to_id, kind, created_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![from_id, to_id, kind.as_str(), now_unix()],
+            "INSERT INTO observations
+                (id, container_tag, content, proof_count, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(id) DO UPDATE SET
+                container_tag = excluded.container_tag,
+                content       = excluded.content,
+                proof_count   = excluded.proof_count,
+                updated_at    = excluded.updated_at",
+            params![
+                observation.id,
+                observation.container_tag,
+                observation.content,
+                observation.proof_count as i64,
+                observation.created_at,
+                observation.updated_at,
+            ],
         )?;
+        Ok(())
+    }
+
+    fn list_observations(&self, container_tag: &str, limit: usize) -> Result<Vec<Observation>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, container_tag, content, proof_count, created_at, updated_at
+             FROM observations
+             WHERE container_tag = ?1
+             ORDER BY updated_at DESC, id
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![container_tag, limit as i64], |row| {
+            Ok(Observation {
+                id: row.get(0)?,
+                container_tag: row.get(1)?,
+                content: row.get(2)?,
+                proof_count: row.get::<_, i64>(3)? as u32,
+                created_at: row.get(4)?,
+                updated_at: row.get(5)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    fn add_observation_source(
+        &mut self,
+        observation_id: &str,
+        source_memory_id: &str,
+    ) -> Result<()> {
+        // Exact mirror of `record_evidence`: two writes as a unit (SAVEPOINT nests in the
+        // daemon batch), set-union the source via the composite PK, then recompute (not +1)
+        // proof_count to the distinct-source count — so re-linking a known source is idempotent.
+        let tx = self.conn.savepoint()?;
+        tx.execute(
+            "INSERT OR IGNORE INTO observation_sources (observation_id, source_memory_id)
+             VALUES (?1, ?2)",
+            params![observation_id, source_memory_id],
+        )?;
+        tx.execute(
+            "UPDATE observations SET
+                proof_count = (SELECT COUNT(DISTINCT source_memory_id)
+                               FROM observation_sources WHERE observation_id = ?1),
+                updated_at = ?2
+             WHERE id = ?1",
+            params![observation_id, now_unix()],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn add_edge(&mut self, from_id: &str, to_id: &str, kind: EdgeKind) -> Result<()> {
+        // Seed `last_activated = created_at`; strength/stability/activation_count take their
+        // column defaults (1.0 / 1.0 / 0). A brand-new edge thus reads as fresh (idle 0)
+        // and un-potentiated until the daemon's recall write-back calls `potentiate_edges`.
+        let now = now_unix();
+        self.conn.execute(
+            "INSERT OR IGNORE INTO relationships (from_id, to_id, kind, created_at, last_activated)
+             VALUES (?1, ?2, ?3, ?4, ?4)",
+            params![from_id, to_id, kind.as_str(), now],
+        )?;
+        Ok(())
+    }
+
+    fn potentiate_edges(&mut self, pairs: &[(String, String)]) -> Result<()> {
+        if pairs.is_empty() {
+            return Ok(());
+        }
+        let now = now_unix();
+        // SAVEPOINT so the whole potentiation set is atomic and nests inside the daemon's
+        // recall write-back batch (like `link_entities`/`record_evidence`). Each UPDATE is
+        // the edge mirror of `reinforce`: cap strength at STRENGTH_MAX, grow stability only
+        // on a Cepeda-spaced activation (the CASE reads the pre-update last_activated), and
+        // stamp last_activated. Direction-agnostic — matches how `graph_search` reads the
+        // edge (either endpoint may be the seed).
+        let tx = self.conn.savepoint()?;
+        for (a, b) in pairs {
+            tx.execute(
+                "UPDATE relationships SET
+                    strength = MIN(?1, strength + ?2),
+                    stability = stability
+                        + CASE WHEN (?3 - COALESCE(last_activated, created_at)) >= ?4
+                               THEN ?5 ELSE 0 END,
+                    last_activated = ?3,
+                    activation_count = activation_count + 1
+                 WHERE (from_id = ?6 AND to_id = ?7) OR (from_id = ?7 AND to_id = ?6)",
+                params![
+                    dynamics::STRENGTH_MAX as f64,
+                    dynamics::EDGE_POTENTIATION_DELTA as f64,
+                    now,
+                    dynamics::SPACING_SECS,
+                    dynamics::EDGE_STABILITY_DELTA as f64,
+                    a,
+                    b,
+                ],
+            )?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -632,15 +751,28 @@ impl VectorStore for SqliteStore {
         // neighbour outranks one merely sharing an entity. The MIN(...,5)/5 saturation is
         // a SQLite-native stand-in for VISION's `tanh(shared·0.5)` (same ranking; RRF
         // fuses by rank, not magnitude; avoids relying on the optional SQL math ext).
-        // Seed ids are store-controlled and bound as parameters (4 groups: two edge
-        // sides, the seed set, and the exclusion set).
+        //
+        // The edge bonus is the kind multiplier (extends 0.85, else 1.0) times the edge's
+        // idle-decayed strength — the SQL inlines `decayed_edge_strength`'s hyperbolic form
+        // `strength / (1 + idle_days/stability)` floored at STRENGTH_FLOOR (pure arithmetic,
+        // no math ext). A fresh edge has decay 1.0, so this preserves the prior flat bonus
+        // for new edges while letting a long-idle edge contribute less. `?1` = now (idle
+        // clock), `?2` = the strength floor. Seed ids are store-controlled and bound as
+        // parameters (4 groups: two edge sides, the seed set, and the exclusion set).
         let ph = vec!["?"; seed_ids.len()].join(",");
         let sql = format!(
             "SELECT {MEMORY_COLS},
                 (MIN(COUNT(DISTINCT me2.entity_id), 5) / 5.0)
-                + MAX(CASE WHEN r.kind = 'extends' THEN 0.85
-                           WHEN r.kind IS NOT NULL THEN 1.0
-                           ELSE 0.0 END) AS score
+                + MAX(CASE
+                        WHEN r.kind IS NULL THEN 0.0
+                        ELSE (CASE WHEN r.kind = 'extends' THEN 0.85 ELSE 1.0 END)
+                             * max(r.strength
+                                    / (1.0
+                                       + (max(? - COALESCE(r.last_activated, r.created_at), 0)
+                                          / 86400.0)
+                                         / max(r.stability, 0.001)),
+                                   ?)
+                      END) AS score
              FROM memory_entities me1
              JOIN memory_entities me2 ON me1.entity_id = me2.entity_id
              JOIN memories m ON m.id = me2.memory_id
@@ -653,12 +785,18 @@ impl VectorStore for SqliteStore {
              ORDER BY score DESC, m.id
              LIMIT ?"
         );
-        let mut sql_params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(seed_ids.len() * 4 + 2);
+        let now = now_unix();
+        let floor = dynamics::STRENGTH_FLOOR as f64;
+        let k = k as i64;
+        let mut sql_params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(seed_ids.len() * 4 + 4);
+        // Order matches left-to-right placeholder appearance: the two SELECT-clause params
+        // (now, floor) precede the four seed groups, then container, then LIMIT.
+        sql_params.push(&now);
+        sql_params.push(&floor);
         for _ in 0..4 {
             sql_params.extend(seed_ids.iter().map(|s| s as &dyn rusqlite::ToSql));
         }
         sql_params.push(&container_tag);
-        let k = k as i64;
         sql_params.push(&k);
 
         let mut stmt = self.conn.prepare(&sql)?;
@@ -707,9 +845,54 @@ impl VectorStore for SqliteStore {
                 })
             },
         )?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
+        let hits = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        // Spread coverage across a *broad* window instead of clustering at its
+        // midpoint (fusion ranks by list position, so this lifts time-spread matches).
+        Ok(temporal_coverage_order(hits, w_start, w_end))
     }
+}
+
+/// Reorder temporal hits (already nearest-to-midpoint first) so a broad window is
+/// covered evenly rather than clustered at its centre. Splits the window into buckets
+/// by occurred-midpoint and interleaves round-robin — bucket 0's best, bucket 1's
+/// best, …, then the second from each — so every part of the window gets a slot near
+/// the front. A narrow window (≤ [`COVERAGE_MIN_SPAN_DAYS`]) or a small result set is
+/// returned unchanged: nearest-first is already right there.
+fn temporal_coverage_order(hits: Vec<ScoredMemory>, w_start: i64, w_end: i64) -> Vec<ScoredMemory> {
+    /// Below this window span, bucketing is pointless (a single day/few days).
+    const COVERAGE_MIN_SPAN_DAYS: i64 = 3;
+    /// Max buckets to spread across (mirrors hindsight's 8-way coverage split).
+    const BUCKETS: usize = 8;
+
+    let span = w_end - w_start;
+    if span <= COVERAGE_MIN_SPAN_DAYS * 86_400 || hits.len() <= 2 {
+        return hits;
+    }
+    let n = BUCKETS.min(hits.len());
+    let mut buckets: Vec<Vec<ScoredMemory>> = vec![Vec::new(); n];
+    for h in hits {
+        let mid = (h.memory.occurred_start.unwrap_or(w_start)
+            + h.memory
+                .occurred_end
+                .unwrap_or_else(|| h.memory.occurred_start.unwrap_or(w_start)))
+            / 2;
+        // Clamp into [0, n): a memory whose interval overlaps the window can have a
+        // midpoint just outside it.
+        let idx = (((mid - w_start).max(0) as i128 * n as i128) / (span as i128 + 1)) as usize;
+        buckets[idx.min(n - 1)].push(h);
+    }
+    // Round-robin: take rank-1 of each non-empty bucket, then rank-2, … (each bucket
+    // is still nearest-first internally, from the SQL ORDER BY).
+    let mut out = Vec::new();
+    let depth = buckets.iter().map(Vec::len).max().unwrap_or(0);
+    for rank in 0..depth {
+        for b in &mut buckets {
+            if let Some(h) = b.get(rank).cloned() {
+                out.push(h);
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -791,6 +974,32 @@ mod tests {
         let hits = s.text_search(tag, "tailwind", 5).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].memory.id, "m1");
+    }
+
+    #[test]
+    fn text_search_ors_terms_for_recall() {
+        // A multi-word query whose terms are spread across different memories must
+        // still recall them (OR semantics) — implicit-AND would return nothing here.
+        let mut s = SqliteStore::open_in_memory(2).unwrap();
+        let tag = "t";
+        s.upsert(&mem("m1", "the user prefers tailwind", tag, vec![1.0, 0.0]))
+            .unwrap();
+        s.upsert(&mem(
+            "m2",
+            "deploy with docker compose",
+            tag,
+            vec![0.0, 1.0],
+        ))
+        .unwrap();
+
+        // No single memory contains all three terms; OR recalls both, AND neither.
+        let hits = s.text_search(tag, "tailwind docker deploy", 5).unwrap();
+        let ids: std::collections::HashSet<&str> =
+            hits.iter().map(|h| h.memory.id.as_str()).collect();
+        assert!(
+            ids.contains("m1") && ids.contains("m2"),
+            "OR recalls both: {ids:?}"
+        );
     }
 
     #[test]
@@ -1317,6 +1526,128 @@ mod tests {
         assert_eq!(g[1].memory.id, "c");
     }
 
+    /// Read an edge's dynamics fields directly (no public accessor by design — the daemon
+    /// treats these as internal recall bookkeeping).
+    fn edge_dynamics(s: &SqliteStore, from: &str, to: &str) -> (f64, f64, i64, i64) {
+        s.conn
+            .query_row(
+                "SELECT strength, stability, last_activated, activation_count
+                 FROM relationships WHERE from_id = ?1 AND to_id = ?2",
+                params![from, to],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn add_edge_seeds_fresh_edge_dynamics() {
+        let mut s = SqliteStore::open_in_memory(2).unwrap();
+        s.upsert(&mem("a", "a", "t", vec![1.0, 0.0])).unwrap();
+        s.upsert(&mem("b", "b", "t", vec![0.0, 1.0])).unwrap();
+        s.add_edge("a", "b", EdgeKind::Extends).unwrap();
+        let (strength, stability, last_activated, count) = edge_dynamics(&s, "a", "b");
+        // Defaults + a seeded last_activated so decay measures idle time from creation.
+        assert_eq!((strength, stability, count), (1.0, 1.0, 0));
+        assert!(last_activated > 0, "last_activated seeded to created_at");
+    }
+
+    #[test]
+    fn potentiate_edges_caps_strength_and_gates_stability_on_spacing() {
+        let mut s = SqliteStore::open_in_memory(2).unwrap();
+        s.upsert(&mem("a", "a", "t", vec![1.0, 0.0])).unwrap();
+        s.upsert(&mem("b", "b", "t", vec![0.0, 1.0])).unwrap();
+        s.add_edge("a", "b", EdgeKind::Extends).unwrap();
+        let pair = [("a".to_string(), "b".to_string())];
+
+        // Back-date the edge so the first potentiation is Cepeda-spaced (> SPACING_SECS
+        // since creation) and thus builds durability.
+        let old = now_unix() - dynamics::SPACING_SECS - 10;
+        s.conn
+            .execute(
+                "UPDATE relationships SET last_activated = ?1 WHERE from_id='a' AND to_id='b'",
+                params![old],
+            )
+            .unwrap();
+        let (_, stability_before, _, _) = edge_dynamics(&s, "a", "b");
+
+        s.potentiate_edges(&pair).unwrap(); // spaced → strength up, stability up
+        let (strength, stability_spaced, _, count) = edge_dynamics(&s, "a", "b");
+        assert!(strength > 1.0, "co-access potentiates strength");
+        assert_eq!(count, 1);
+        assert!(
+            stability_spaced > stability_before,
+            "spaced co-access builds edge durability"
+        );
+
+        s.potentiate_edges(&pair).unwrap(); // immediate burst → no stability growth
+        let (_, stability_burst, _, count) = edge_dynamics(&s, "a", "b");
+        assert_eq!(count, 2, "activation_count still tallies bursts");
+        assert_eq!(
+            stability_burst, stability_spaced,
+            "a rapid burst must not build edge durability"
+        );
+
+        // Direction-agnostic: potentiating (b, a) hits the same a→b edge; and strength
+        // is capped at STRENGTH_MAX no matter how many co-accesses land.
+        let reverse = [("b".to_string(), "a".to_string())];
+        for _ in 0..100 {
+            s.potentiate_edges(&reverse).unwrap();
+        }
+        let (strength, ..) = edge_dynamics(&s, "a", "b");
+        assert!(
+            strength <= dynamics::STRENGTH_MAX as f64,
+            "Hebbian cap bounds runaway edge strength"
+        );
+
+        // Unknown pair is a no-op, not an error.
+        s.potentiate_edges(&[("nope".to_string(), "gone".to_string())])
+            .unwrap();
+    }
+
+    #[test]
+    fn graph_search_fresh_edge_outranks_stale_edge() {
+        // Two neighbours each share one entity with the seed and are edge-linked to it, so
+        // only the edge's idle-decay differs: the fresh edge must activate more than the
+        // long-idle one and rank first.
+        let mut s = SqliteStore::open_in_memory(2).unwrap();
+        let tag = "t";
+        for id in ["a", "fresh", "stale"] {
+            s.upsert(&mem(id, "x", tag, vec![1.0, 0.0])).unwrap();
+        }
+        s.link_entities("a", tag, &["e1".into()]).unwrap();
+        s.link_entities("fresh", tag, &["e1".into()]).unwrap();
+        s.link_entities("stale", tag, &["e1".into()]).unwrap();
+        s.add_edge("a", "fresh", EdgeKind::Extends).unwrap();
+        s.add_edge("a", "stale", EdgeKind::Extends).unwrap();
+        // Age the stale edge ~400 days into the past so its strength decays toward the floor.
+        let long_idle = now_unix() - 86_400 * 400;
+        s.conn
+            .execute(
+                "UPDATE relationships SET last_activated = ?1 WHERE to_id = 'stale'",
+                params![long_idle],
+            )
+            .unwrap();
+
+        let g = s.graph_search(tag, &["a".to_string()], 10).unwrap();
+        assert_eq!(g.len(), 2);
+        assert_eq!(
+            g[0].memory.id, "fresh",
+            "a fresh edge outranks a long-idle one"
+        );
+        assert!(g[0].score > g[1].score);
+        assert_eq!(g[1].memory.id, "stale");
+        // Fresh edge ~undecayed: 0.2 shared-entity + 0.85 * ~1.0 = ~1.05 (tolerance absorbs
+        // any sub-second idle between add_edge and this query).
+        assert!((g[0].score - 1.05).abs() < 1e-3, "{}", g[0].score);
+        // Stale edge floored: 0.2 + 0.85 * STRENGTH_FLOOR.
+        let stale_expected = 0.2 + 0.85 * dynamics::STRENGTH_FLOOR;
+        assert!(
+            (g[1].score - stale_expected).abs() < 1e-4,
+            "{} vs {stale_expected}",
+            g[1].score
+        );
+    }
+
     #[test]
     fn temporal_search_overlaps_window_nearest_first() {
         let mut s = SqliteStore::open_in_memory(2).unwrap();
@@ -1341,5 +1672,64 @@ mod tests {
             .unwrap();
         let ids: Vec<&str> = g.iter().map(|m| m.memory.id.as_str()).collect();
         assert_eq!(ids, vec!["in", "near"], "overlapping only, nearest-first");
+    }
+
+    #[test]
+    fn temporal_coverage_spreads_a_broad_window() {
+        // A broad window (a year) with matches clustered at the start plus one late
+        // match: coverage bucketing must lift the late match toward the front rather
+        // than burying it behind the early cluster (nearest-first would rank it last).
+        let day = 86_400;
+        let base = 1_781_000_000;
+        let w_start = base;
+        let w_end = base + 365 * day;
+        let make = |id: &str, mid: i64| {
+            let mut m = mem(id, "x", "t", vec![1.0, 0.0]);
+            m.occurred_start = Some(mid);
+            m.occurred_end = Some(mid);
+            // Score = distance to the window midpoint (as the SQL computes).
+            let w_mid = (w_start + w_end) / 2;
+            ScoredMemory {
+                score: (mid - w_mid).unsigned_abs() as f32,
+                memory: m,
+            }
+        };
+        // Three early (near start) + one late (near end), pre-sorted nearest-to-mid.
+        let early: Vec<_> = vec![
+            make("e1", w_start + 10 * day),
+            make("e2", w_start + 20 * day),
+            make("e3", w_start + 30 * day),
+        ];
+        let late = make("late", w_end - 10 * day);
+        // Nearest-to-midpoint order: the late one is closest to mid, then earlies by mid-dist.
+        let mut hits = vec![late.clone()];
+        hits.extend(early);
+        let ordered = temporal_coverage_order(hits, w_start, w_end);
+        let ids: Vec<&str> = ordered.iter().map(|m| m.memory.id.as_str()).collect();
+        // Every match survives, and the late match lands in the first two slots
+        // (its own bucket's rank-1), not buried after the whole early cluster.
+        assert_eq!(ordered.len(), 4);
+        let late_pos = ids.iter().position(|&i| i == "late").unwrap();
+        assert!(late_pos <= 1, "late match spread to the front: {ids:?}");
+    }
+
+    #[test]
+    fn temporal_coverage_leaves_narrow_windows_untouched() {
+        // A one-day window returns nearest-first unchanged (no bucketing).
+        let day = 86_400;
+        let base = 1_781_000_000;
+        let m = |id: &str, mid: i64| {
+            let mut mm = mem(id, "x", "t", vec![1.0, 0.0]);
+            mm.occurred_start = Some(mid);
+            mm.occurred_end = Some(mid);
+            ScoredMemory {
+                score: 0.0,
+                memory: mm,
+            }
+        };
+        let hits = vec![m("a", base), m("b", base + day / 2), m("c", base + day)];
+        let ordered = temporal_coverage_order(hits, base, base + day);
+        let ids: Vec<&str> = ordered.iter().map(|m| m.memory.id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "b", "c"], "narrow window is unchanged");
     }
 }

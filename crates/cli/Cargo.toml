@@ -1,6 +1,6 @@
 [package]
 name = "memeora"
-description = "memeora CLI: doctor/add/ingest/recall/context/list/forget/scope/dashboard/models"
+description = "memeora CLI: doctor/add/ingest/recall/context/list/forget/consolidate/scope/dashboard/models"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

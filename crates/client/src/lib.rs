@@ -188,6 +188,32 @@ impl Client {
         }
     }
 
+    /// Single-call context bundle: the scope's profile (statics, dynamics) **and** the
+    /// query's recall hits, in one round-trip. Returns `(statics, dynamics, memories)`,
+    /// deduped by id (a profile memory never reappears in `memories`). Gate on the
+    /// `bundle` capability; `max_tokens` budgets the recall portion like [`Self::recall_within`].
+    pub fn bundle(
+        &mut self,
+        scope: &str,
+        query: &str,
+        k: usize,
+        max_tokens: Option<usize>,
+    ) -> io::Result<(Vec<MemoryDto>, Vec<MemoryDto>, Vec<MemoryDto>)> {
+        match self.call(&Request::Bundle {
+            scope: scope.to_string(),
+            query: query.to_string(),
+            k,
+            max_tokens,
+        })? {
+            Response::Bundle {
+                statics,
+                dynamics,
+                memories,
+            } => Ok((statics, dynamics, memories)),
+            other => Err(unexpected(other)),
+        }
+    }
+
     /// Fetch the profile (static facts/prefs, dynamic episodes) for a scope.
     pub fn context(&mut self, scope: &str) -> io::Result<(Vec<MemoryDto>, Vec<MemoryDto>)> {
         match self.call(&Request::Context {
@@ -213,6 +239,21 @@ impl Client {
     pub fn forget(&mut self, id: &str) -> io::Result<()> {
         match self.call(&Request::Forget { id: id.to_string() })? {
             Response::Forgotten => Ok(()),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Consolidate a scope: distil its near-duplicate memories into distinct-source-proofed
+    /// observations. Returns `(observations, sources_linked)`. Idempotent — re-running
+    /// converges. Gate on the `consolidate` capability.
+    pub fn consolidate(&mut self, scope: &str) -> io::Result<(usize, usize)> {
+        match self.call(&Request::Consolidate {
+            scope: scope.to_string(),
+        })? {
+            Response::Consolidated {
+                observations,
+                sources_linked,
+            } => Ok((observations, sources_linked)),
             other => Err(unexpected(other)),
         }
     }
@@ -314,6 +355,28 @@ mod tests {
         let (added, reinforced) = client.ingest("s", "I prefer rust. We use SQLite.").unwrap();
         assert_eq!(added, 2);
         assert_eq!(reinforced, 0);
+    }
+
+    #[test]
+    fn bundle_returns_profile_and_recall() {
+        let socket = "memeora-test-client-bundle.sock";
+        start_server(socket);
+        let mut client = connect_retry(socket);
+        // The daemon advertises the bundle capability.
+        assert!(client.supports(memeora_proto::capability::BUNDLE));
+
+        let pref = client.add("s", "I prefer dark mode", "preference").unwrap();
+        client
+            .add("s", "deployed the app today", "episode")
+            .unwrap();
+
+        let (statics, dynamics, memories) = client.bundle("s", "dark mode", 5, None).unwrap();
+        assert_eq!(statics.len(), 1);
+        assert_eq!(statics[0].id, pref);
+        assert_eq!(dynamics.len(), 1);
+        assert_eq!(dynamics[0].kind, "episode");
+        // Whatever recall surfaces, the profiled preference is never duplicated.
+        assert!(memories.iter().all(|m| m.id != pref));
     }
 
     #[test]

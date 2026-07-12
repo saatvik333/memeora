@@ -32,6 +32,8 @@ test("capability tokens match the Rust proto", () => {
     "forget",
     "token_budget",
     "evidence",
+    "bundle",
+    "consolidate",
   ];
   for (const cap of expected) {
     expect(lib).toContain(`pub const ${cap.toUpperCase()}: &str = "${cap}";`);

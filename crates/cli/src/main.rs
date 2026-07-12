@@ -75,6 +75,11 @@ enum Command {
         /// Memory id.
         id: String,
     },
+    /// Consolidate a scope: distil near-duplicate memories into proof-counted observations.
+    Consolidate {
+        /// Scope/container tag.
+        scope: String,
+    },
     /// Print the project container tag for a path (defaults to the cwd).
     ///
     /// Daemon-free: lets adapters (e.g. the OpenCode shim) resolve the same
@@ -301,6 +306,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         Command::Forget { id } => {
             client.forget(&id)?;
             println!("forgotten {id}");
+        }
+        Command::Consolidate { scope } => {
+            let (observations, sources) = client.consolidate(&scope)?;
+            println!("consolidated {scope}: {observations} observations, {sources} sources linked");
         }
         Command::Dashboard { no_open } => {
             // Reaching here means the daemon handshake above succeeded, so the
