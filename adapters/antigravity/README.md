@@ -16,7 +16,7 @@ antigravity`, which differs from the Claude/Codex path:
 
 ```sh
 cargo install --path crates/cli   # builds memeora, memeora-mcp, memeora-hook, memeora-daemon
-memeora-daemon &
+memeora serve &
 ```
 
 ## Install

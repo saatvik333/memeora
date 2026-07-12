@@ -9,7 +9,7 @@ The `memeora` CLI (and the daemon) must be installed and running:
 
 ```sh
 cargo install --path crates/cli   # builds memeora, memeora-mcp, memeora-hook, memeora-daemon
-memeora-daemon &
+memeora serve &
 ```
 
 ## Option A — MCP only (zero code)

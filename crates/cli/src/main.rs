@@ -28,6 +28,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Run the engine daemon in the foreground (models + DB + IPC server).
+    ///
+    /// Equivalent to the `memeora-daemon` binary; provided so the single `memeora`
+    /// command covers the whole lifecycle. Blocks until interrupted — background it
+    /// with `&`. Honors `--socket` (forwarded as `MEMEORA_SOCKET`) and the daemon's
+    /// env (`MEMEORA_HOME`, `MEMEORA_ALLOW_MODEL_DOWNLOAD`, …).
+    Serve,
     /// Check that the daemon is reachable and report its protocol version.
     Doctor,
     /// Store a single explicit memory.
@@ -231,6 +238,18 @@ fn open_browser(url: &str) -> std::io::Result<()> {
 fn main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
 
+    // `serve` *is* the daemon — hand off before trying to connect as a client.
+    if let Command::Serve = &cli.command {
+        // The daemon resolves its socket from `$MEMEORA_SOCKET`; forward an explicit
+        // `--socket` so `memeora --socket X serve` binds exactly where the CLI looks.
+        if let Some(s) = &cli.socket {
+            // SAFETY: single-threaded process startup, before the daemon spawns any
+            // threads or reads the env — no concurrent access to the environment.
+            unsafe { std::env::set_var("MEMEORA_SOCKET", s) };
+        }
+        return memeora_daemon::run();
+    }
+
     // `scope` and `adapter` are pure local commands — handle them before the daemon.
     if let Command::Scope { path } = &cli.command {
         let path = match path {
@@ -330,7 +349,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         }
         // Handled above before the daemon connection.
-        Command::Scope { .. } | Command::Models { .. } => {
+        Command::Serve | Command::Scope { .. } | Command::Models { .. } => {
             unreachable!("daemon-free commands are handled before connecting")
         }
     }

@@ -11,11 +11,12 @@ daemon must be running:
 
 ```sh
 cargo install --path crates/cli   # builds memeora, memeora-mcp, memeora-hook, memeora-daemon
-memeora-daemon &        # loads the model + DB once, serves the local socket
+memeora serve &         # loads the model + DB once, serves the local socket
 ```
 
-(A first-class installer lands with the release step; for now `cargo install`
-puts the binaries on `PATH`.)
+(`memeora serve` is the daemon; `memeora-daemon` is the same thing. A first-class
+installer lands with the release step; for now `cargo install` puts the binaries
+on `PATH`.)
 
 ## Install (plugin marketplace)
 

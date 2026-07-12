@@ -11,7 +11,7 @@ Gives OpenAI Codex persistent memory via the same `memeora-mcp` server and
 
 ```sh
 cargo install --path crates/cli   # builds memeora, memeora-mcp, memeora-hook, memeora-daemon
-memeora-daemon &
+memeora serve &
 ```
 
 ## Install — stable path (recommended)
