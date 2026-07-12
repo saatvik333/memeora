@@ -85,6 +85,21 @@ fn migrations() -> Migrations<'static> {
         );
         CREATE INDEX idx_evidence_memory ON evidence(memory_id);",
         ),
+        // Edge dynamics (Phase E): Hebbian potentiation + Ebbinghaus/Cepeda decay applied
+        // to graph edges, mirroring the per-memory strength model. `strength` is the
+        // potentiation level at last co-activation; `stability` is Cepeda durability (grows
+        // only on spaced activations, slows decay); `last_activated` is the last
+        // co-activation time (nullable — `graph_search` COALESCEs to `created_at`);
+        // `activation_count` is the Hebbian activation tally. Additive ALTERs (defaults
+        // back-fill existing rows in place); the UPDATE seeds `last_activated` for edges
+        // that predate this migration so decay measures idle time from creation.
+        M::up(
+            "ALTER TABLE relationships ADD COLUMN strength REAL NOT NULL DEFAULT 1.0;
+             ALTER TABLE relationships ADD COLUMN stability REAL NOT NULL DEFAULT 1.0;
+             ALTER TABLE relationships ADD COLUMN last_activated INTEGER;
+             ALTER TABLE relationships ADD COLUMN activation_count INTEGER NOT NULL DEFAULT 0;
+             UPDATE relationships SET last_activated = created_at WHERE last_activated IS NULL;",
+        ),
     ])
 }
 
@@ -102,5 +117,39 @@ mod tests {
     fn migrations_are_valid() {
         // rusqlite_migration validates that every migration parses and applies cleanly.
         assert!(migrations().validate().is_ok());
+    }
+
+    #[test]
+    fn relationships_gain_edge_dynamics_columns() {
+        // The Phase-E migration widens `relationships` with edge-dynamics columns whose
+        // defaults back-fill any row inserted without them (the sole-writer daemon never
+        // sets strength/stability/activation_count on the insert path).
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate(&mut conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO memories (id, content, kind, container_tag, created_at, last_accessed_at)
+               VALUES ('a','x','fact','t',100,100),('b','y','fact','t',100,100);
+             INSERT INTO relationships (from_id, to_id, kind, created_at)
+               VALUES ('a','b','extends',150);",
+        )
+        .unwrap();
+        let (strength, stability, count): (f64, f64, i64) = conn
+            .query_row(
+                "SELECT strength, stability, activation_count FROM relationships WHERE from_id='a'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((strength, stability, count), (1.0, 1.0, 0));
+        // `last_activated` is nullable; rows inserted without it (bypassing `add_edge`) stay
+        // NULL — `graph_search` COALESCEs to `created_at`, so decay still has an anchor.
+        let last_activated: Option<i64> = conn
+            .query_row(
+                "SELECT last_activated FROM relationships WHERE from_id='a'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(last_activated.is_none());
     }
 }

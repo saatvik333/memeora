@@ -56,6 +56,13 @@ pub(crate) enum Prepared {
     Context {
         scope: String,
     },
+    Bundle {
+        scope: String,
+        query: String,
+        query_embedding: Vec<f32>,
+        k: usize,
+        max_tokens: Option<usize>,
+    },
     List {
         scope: String,
         limit: usize,
@@ -141,6 +148,22 @@ impl Preparer {
                 }
             }
             Request::Context { scope } => Prepared::Context { scope },
+            Request::Bundle {
+                scope,
+                query,
+                k,
+                max_tokens,
+            } => {
+                // Embed the query here (off the writer thread), mirroring Recall.
+                let query_embedding = self.embedder.embed_query(&query)?;
+                Prepared::Bundle {
+                    scope,
+                    query,
+                    query_embedding,
+                    k,
+                    max_tokens,
+                }
+            }
             Request::List { scope, limit } => Prepared::List { scope, limit },
             Request::Forget { id } => Prepared::Forget { id },
         })
@@ -332,6 +355,55 @@ impl Engine {
                 }
             }
 
+            Prepared::Bundle {
+                scope,
+                query,
+                query_embedding,
+                k,
+                max_tokens,
+            } => {
+                // Profile (cached) + recall in one round-trip. Both read the store; the
+                // profile comes from the same cache Context uses, the recall from the
+                // same `search` Recall uses.
+                let profile = self.profiles.get_or_build(&self.store, &scope)?;
+                let params = SearchParams {
+                    k,
+                    max_tokens,
+                    ..self.search_params.clone()
+                };
+                let hits = search(&self.store, &scope, &query_embedding, &query, &params)?;
+                let now = now_unix();
+
+                // Dedup by id with priority static > dynamic > search: strip anything
+                // already surfaced by a higher-priority section (the real case is a
+                // recall hit that also lives in the profile).
+                let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+                let statics: Vec<MemoryDto> = profile
+                    .statics
+                    .iter()
+                    .inspect(|m| {
+                        seen.insert(m.id.as_str());
+                    })
+                    .map(|m| memory_to_dto(m, now))
+                    .collect();
+                let dynamics: Vec<MemoryDto> = profile
+                    .dynamics
+                    .iter()
+                    .filter(|m| seen.insert(m.id.as_str()))
+                    .map(|m| memory_to_dto(m, now))
+                    .collect();
+                let memories: Vec<MemoryDto> = hits
+                    .iter()
+                    .filter(|h| seen.insert(h.memory.id.as_str()))
+                    .map(|h| scored_to_dto(h, now))
+                    .collect();
+                Response::Bundle {
+                    statics,
+                    dynamics,
+                    memories,
+                }
+            }
+
             Prepared::List { scope, limit } => {
                 let memories = self.store.list_latest(&scope, limit)?;
                 let now = now_unix();
@@ -484,6 +556,67 @@ mod tests {
             Response::Context { statics, dynamics } => {
                 assert_eq!(statics.len(), 2); // a preference + a fact
                 assert_eq!(dynamics.len(), 0);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bundle_returns_profile_and_deduped_recall() {
+        let mut e = engine(&[
+            ("I prefer dark mode", vec![1.0, 0.0, 0.0]),
+            ("deployed the app today", vec![0.0, 1.0, 0.0]),
+        ]);
+        let scope = "s";
+        let pref_id = match e.handle(Request::Add {
+            scope: scope.into(),
+            content: "I prefer dark mode".into(),
+            kind: "preference".into(),
+        }) {
+            Response::Added { id } => id,
+            other => panic!("unexpected: {other:?}"),
+        };
+        e.handle(Request::Add {
+            scope: scope.into(),
+            content: "deployed the app today".into(),
+            kind: "episode".into(),
+        });
+
+        // Sanity: a plain recall DOES surface the preference — so the bundle's dedup
+        // is what removes it from `memories`, not a missing hit.
+        match e.handle(Request::Recall {
+            scope: scope.into(),
+            query: "I prefer dark mode".into(),
+            k: 5,
+            max_tokens: None,
+        }) {
+            Response::Memories { memories } => {
+                assert!(memories.iter().any(|m| m.id == pref_id));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        match e.handle(Request::Bundle {
+            scope: scope.into(),
+            query: "I prefer dark mode".into(),
+            k: 5,
+            max_tokens: None,
+        }) {
+            Response::Bundle {
+                statics,
+                dynamics,
+                memories,
+            } => {
+                // Profile partitions by kind: the preference is static, episode dynamic.
+                assert_eq!(statics.len(), 1);
+                assert_eq!(statics[0].id, pref_id);
+                assert_eq!(dynamics.len(), 1);
+                assert_eq!(dynamics[0].kind, "episode");
+                // The preference lives in `statics`, so its recall hit is deduped out.
+                assert!(
+                    memories.iter().all(|m| m.id != pref_id),
+                    "static leaked into memories: {memories:?}"
+                );
             }
             other => panic!("unexpected: {other:?}"),
         }

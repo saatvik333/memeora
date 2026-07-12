@@ -28,10 +28,17 @@ Requests are a serde-tagged enum on `"op"`; responses on `"type"`:
 | `add` | `added` | `add` |
 | `recall` | `memories` | `recall` |
 | `context` | `context` | `context` |
+| `bundle` | `bundle` | `bundle` |
 | `list` | `memories` | `list` |
 | `forget` | `forgotten` | `forget` |
 
 Any request can also come back as `{"type":"error","message":"…"}`.
+
+`bundle` is a one-round-trip convenience: `{"op":"bundle","scope":"…","query":"…","k":10,"max_tokens":null}`
+returns `{"type":"bundle","statics":[…],"dynamics":[…],"memories":[…]}` — the scope
+profile (statics + dynamics, as `context`) plus the query's recall hits (as `recall`),
+with any recall hit already in the profile removed (priority static > dynamic > search).
+Additive + capability-gated (`bundle`); older daemons simply don't advertise it.
 
 ### Optional, capability-gated fields
 

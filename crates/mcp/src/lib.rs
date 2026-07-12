@@ -181,12 +181,18 @@ pub struct ScopeArgs {
     pub limit: Option<usize>,
 }
 
-/// Arguments for `context` — scope only (no `limit`, which `context` ignores, so it
-/// must not appear in the tool's JSON schema and mislead callers).
+/// Arguments for `context`. Scope, plus an optional `query`: when set, the profile is
+/// returned **with** the query's recall hits in one round-trip (a bundle). No `limit`
+/// (which `context` ignores), so it must not appear in the schema and mislead callers.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ContextArgs {
     /// Scope/container tag (defaults to the current project).
     pub scope: Option<String>,
+    /// Optional query: when set, also surface memories relevant to it, returned
+    /// alongside the profile in the same call.
+    pub query: Option<String>,
+    /// Max relevant memories when `query` is set (default 10).
+    pub k: Option<usize>,
 }
 
 /// Arguments for `forget`.
@@ -275,13 +281,33 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Get the profile (stable facts/preferences + recent episodes) for a scope."
+        description = "Get the profile (stable facts/preferences + recent episodes) for a scope. Pass `query` to also fetch relevant memories in the same call."
     )]
     async fn context(
         &self,
         Parameters(args): Parameters<ContextArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let scope = resolve_scope(args.scope, &self.default_scope);
+        // With a query, this is a bundle (profile + recall in one round-trip); keyed
+        // distinctly under "bundle" so it never collides with a plain context result.
+        if let Some(query) = args.query.filter(|q| !q.trim().is_empty()) {
+            let k = args.k.unwrap_or(10);
+            let key = self.cache.key("bundle", &scope, &query, k, None);
+            if let Some(text) = self.cache.get(&key) {
+                return Ok(CallToolResult::success(vec![Content::text(text)]));
+            }
+            let socket = self.socket.clone();
+            let (statics, dynamics, memories) =
+                blocking(move || Client::connect(&socket)?.bundle(&scope, &query, k, None)).await?;
+            let text = format!(
+                "## Stable\n{}\n\n## Recent\n{}\n\n## Relevant\n{}",
+                render(&statics),
+                render(&dynamics),
+                render(&memories)
+            );
+            self.cache.insert(key, text.clone());
+            return Ok(CallToolResult::success(vec![Content::text(text)]));
+        }
         let key = self.cache.key("context", &scope, "", 0, None);
         if let Some(text) = self.cache.get(&key) {
             return Ok(CallToolResult::success(vec![Content::text(text)]));
@@ -498,6 +524,11 @@ mod tests {
         assert_ne!(base, cache.key("recall", "s", "q", 10, Some(100)));
         // Normalization folds whitespace/case variants into the same key.
         assert_eq!(base, cache.key("recall", "s", " Q  ", 10, None));
+        // The bundle path keys distinctly from both a plain recall and a plain
+        // context, so a bundle result is never served for either (or vice versa).
+        let bundle = cache.key("bundle", "s", "q", 10, None);
+        assert_ne!(bundle, base);
+        assert_ne!(bundle, cache.key("context", "s", "", 0, None));
     }
 
     #[tokio::test]

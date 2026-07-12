@@ -254,6 +254,32 @@ pub trait VectorStore {
     /// of the same kind are ignored).
     fn add_edge(&mut self, from_id: &str, to_id: &str, kind: EdgeKind) -> Result<()>;
 
+    /// Hebbian potentiation of graph edges co-activated during recall (Phase E). For each
+    /// unordered `(a, b)` pair, bump every edge between `a` and `b` (either direction):
+    /// `strength += `[`EDGE_POTENTIATION_DELTA`] capped at [`STRENGTH_MAX`], grow
+    /// `stability` by [`EDGE_STABILITY_DELTA`] **only** when this activation is
+    /// ≥ [`SPACING_SECS`] after the last (Cepeda spacing — rapid bursts don't build
+    /// durability), and stamp `last_activated = now`. Unknown pairs are a no-op. Default:
+    /// no-op, for stores without edge dynamics.
+    ///
+    /// **Write path only.** This is the mirror of [`reinforce`](VectorStore::reinforce) for
+    /// edges: it mutates, so — like every write — it belongs to the sole-writer daemon.
+    /// [`graph_search`](VectorStore::graph_search) runs on `&self` (a read) and must never
+    /// call it; the daemon collects the edges a recall traversed and potentiates them on
+    /// the recall write-back, off the read path.
+    ///
+    /// [`EDGE_POTENTIATION_DELTA`]: crate::dynamics::EDGE_POTENTIATION_DELTA
+    /// [`EDGE_STABILITY_DELTA`]: crate::dynamics::EDGE_STABILITY_DELTA
+    /// [`STRENGTH_MAX`]: crate::dynamics::STRENGTH_MAX
+    /// [`SPACING_SECS`]: crate::dynamics::SPACING_SECS
+    // ponytail: the recall write-back that feeds this pairs list lives in the daemon's
+    // recall vertical (out of this crate's file scope) — wire graph_search's surfaced
+    // seed→neighbor edges into a potentiate_edges call there, alongside the existing
+    // reinforce write-back.
+    fn potentiate_edges(&mut self, _pairs: &[(String, String)]) -> Result<()> {
+        Ok(())
+    }
+
     /// All outgoing edges from `id`.
     fn edges_from(&self, id: &str) -> Result<Vec<Relationship>>;
 
@@ -313,7 +339,10 @@ pub trait VectorStore {
     /// Graph recall channel: latest memories in `container_tag` that share canonical
     /// entities with any of `seed_ids` (seeds excluded), ranked by a bounded activation
     /// score — a saturating shared-entity term plus a bonus when the memory is also
-    /// directly graph-linked to a seed — best first, capped at `k`. Default: empty.
+    /// directly graph-linked to a seed. The edge bonus is weighted by the edge's
+    /// idle-decayed strength ([`crate::dynamics::decayed_edge_strength`]), so a fresh,
+    /// often-reinforced relationship activates more than a long-idle one. Best first,
+    /// capped at `k`. Default: empty.
     fn graph_search(
         &self,
         _container_tag: &str,

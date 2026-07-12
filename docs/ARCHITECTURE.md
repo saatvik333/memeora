@@ -288,6 +288,27 @@ memeora must be **easy for the open-source community to extend to new harnesses*
 > injected context. *(Deferred, pending harness-measured evidence: temporal-coverage bucketing,
 > date-augmented embeddings, fuzzy entity resolution, synthetic recall-decoy docs.)*
 
+> **Steal-program — Phases D–E (2026-07-12, on `main`).** **(D) Single-call context bundle**
+> (supermemory's flagship DX): additive `Request::Bundle {scope, query, k, max_tokens}` →
+> `Response::Bundle {statics, dynamics, memories}` + a `bundle` capability token, returning the
+> scope profile *and* the query's recall in one round-trip, deduped **static > dynamic > search**
+> by id. The daemon assembles it from existing core APIs (`ProfileCache` + `search`); the MCP folds
+> it into `context` (optional `query`/`k` — zero new tools) under the same generation-invalidated
+> per-turn cache; Rust + TS clients get a `bundle` method; the parity test pins `bundle`. Plus a
+> **wake-up artifact**: `format_context` is now bounded to ~800 tokens (`WAKE_TOKEN_BUDGET`),
+> importance-first, with a "…(more via recall)" overflow marker (the strip covers the marker too).
+> **(E) Edge dynamics** (MemPalace `dynamics.py`, applied to graph edges — resolves the deferred
+> `// ponytail: edge decay` note): a migration adds `strength`/`stability`/`last_activated`/
+> `activation_count` to `relationships`; `decayed_edge_strength` is a **hyperbolic** decay
+> `strength/(1 + idle_days/stability)` (SQL-expressible — the codebase avoids the optional math ext,
+> so no `exp()`), folded into `graph_search`'s activation so a long-idle edge contributes less while
+> a fresh edge reproduces the prior flat bonus exactly. `potentiate_edges` (Hebbian +cap, Cepeda
+> spacing on stability) is a tested write-path primitive. *(Deferred, by design: the recall→
+> potentiate write-back — the daemon deliberately never mutates on the read path, so edge
+> potentiation belongs on a write-path co-access hook; edge-decay's ranking impact wants Phase-A
+> harness validation. Phase F — local rerank wiring + the opt-in LLM consolidation→observations
+> loop — is next.)*
+
 **Post-review hardening (applied after a full codebase review):** `upsert` is now an
 edge-preserving in-place UPDATE (delete-then-insert previously cascade-deleted a node's
 graph edges via the `relationships` FK); exact re-ingest reinforces via the content id

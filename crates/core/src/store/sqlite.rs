@@ -515,11 +515,52 @@ impl VectorStore for SqliteStore {
     }
 
     fn add_edge(&mut self, from_id: &str, to_id: &str, kind: EdgeKind) -> Result<()> {
+        // Seed `last_activated = created_at`; strength/stability/activation_count take their
+        // column defaults (1.0 / 1.0 / 0). A brand-new edge thus reads as fresh (idle 0)
+        // and un-potentiated until the daemon's recall write-back calls `potentiate_edges`.
+        let now = now_unix();
         self.conn.execute(
-            "INSERT OR IGNORE INTO relationships (from_id, to_id, kind, created_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![from_id, to_id, kind.as_str(), now_unix()],
+            "INSERT OR IGNORE INTO relationships (from_id, to_id, kind, created_at, last_activated)
+             VALUES (?1, ?2, ?3, ?4, ?4)",
+            params![from_id, to_id, kind.as_str(), now],
         )?;
+        Ok(())
+    }
+
+    fn potentiate_edges(&mut self, pairs: &[(String, String)]) -> Result<()> {
+        if pairs.is_empty() {
+            return Ok(());
+        }
+        let now = now_unix();
+        // SAVEPOINT so the whole potentiation set is atomic and nests inside the daemon's
+        // recall write-back batch (like `link_entities`/`record_evidence`). Each UPDATE is
+        // the edge mirror of `reinforce`: cap strength at STRENGTH_MAX, grow stability only
+        // on a Cepeda-spaced activation (the CASE reads the pre-update last_activated), and
+        // stamp last_activated. Direction-agnostic — matches how `graph_search` reads the
+        // edge (either endpoint may be the seed).
+        let tx = self.conn.savepoint()?;
+        for (a, b) in pairs {
+            tx.execute(
+                "UPDATE relationships SET
+                    strength = MIN(?1, strength + ?2),
+                    stability = stability
+                        + CASE WHEN (?3 - COALESCE(last_activated, created_at)) >= ?4
+                               THEN ?5 ELSE 0 END,
+                    last_activated = ?3,
+                    activation_count = activation_count + 1
+                 WHERE (from_id = ?6 AND to_id = ?7) OR (from_id = ?7 AND to_id = ?6)",
+                params![
+                    dynamics::STRENGTH_MAX as f64,
+                    dynamics::EDGE_POTENTIATION_DELTA as f64,
+                    now,
+                    dynamics::SPACING_SECS,
+                    dynamics::EDGE_STABILITY_DELTA as f64,
+                    a,
+                    b,
+                ],
+            )?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -632,15 +673,28 @@ impl VectorStore for SqliteStore {
         // neighbour outranks one merely sharing an entity. The MIN(...,5)/5 saturation is
         // a SQLite-native stand-in for VISION's `tanh(shared·0.5)` (same ranking; RRF
         // fuses by rank, not magnitude; avoids relying on the optional SQL math ext).
-        // Seed ids are store-controlled and bound as parameters (4 groups: two edge
-        // sides, the seed set, and the exclusion set).
+        //
+        // The edge bonus is the kind multiplier (extends 0.85, else 1.0) times the edge's
+        // idle-decayed strength — the SQL inlines `decayed_edge_strength`'s hyperbolic form
+        // `strength / (1 + idle_days/stability)` floored at STRENGTH_FLOOR (pure arithmetic,
+        // no math ext). A fresh edge has decay 1.0, so this preserves the prior flat bonus
+        // for new edges while letting a long-idle edge contribute less. `?1` = now (idle
+        // clock), `?2` = the strength floor. Seed ids are store-controlled and bound as
+        // parameters (4 groups: two edge sides, the seed set, and the exclusion set).
         let ph = vec!["?"; seed_ids.len()].join(",");
         let sql = format!(
             "SELECT {MEMORY_COLS},
                 (MIN(COUNT(DISTINCT me2.entity_id), 5) / 5.0)
-                + MAX(CASE WHEN r.kind = 'extends' THEN 0.85
-                           WHEN r.kind IS NOT NULL THEN 1.0
-                           ELSE 0.0 END) AS score
+                + MAX(CASE
+                        WHEN r.kind IS NULL THEN 0.0
+                        ELSE (CASE WHEN r.kind = 'extends' THEN 0.85 ELSE 1.0 END)
+                             * max(r.strength
+                                    / (1.0
+                                       + (max(? - COALESCE(r.last_activated, r.created_at), 0)
+                                          / 86400.0)
+                                         / max(r.stability, 0.001)),
+                                   ?)
+                      END) AS score
              FROM memory_entities me1
              JOIN memory_entities me2 ON me1.entity_id = me2.entity_id
              JOIN memories m ON m.id = me2.memory_id
@@ -653,12 +707,18 @@ impl VectorStore for SqliteStore {
              ORDER BY score DESC, m.id
              LIMIT ?"
         );
-        let mut sql_params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(seed_ids.len() * 4 + 2);
+        let now = now_unix();
+        let floor = dynamics::STRENGTH_FLOOR as f64;
+        let k = k as i64;
+        let mut sql_params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(seed_ids.len() * 4 + 4);
+        // Order matches left-to-right placeholder appearance: the two SELECT-clause params
+        // (now, floor) precede the four seed groups, then container, then LIMIT.
+        sql_params.push(&now);
+        sql_params.push(&floor);
         for _ in 0..4 {
             sql_params.extend(seed_ids.iter().map(|s| s as &dyn rusqlite::ToSql));
         }
         sql_params.push(&container_tag);
-        let k = k as i64;
         sql_params.push(&k);
 
         let mut stmt = self.conn.prepare(&sql)?;
@@ -1315,6 +1375,128 @@ mod tests {
         );
         assert!(g[0].score > g[1].score);
         assert_eq!(g[1].memory.id, "c");
+    }
+
+    /// Read an edge's dynamics fields directly (no public accessor by design — the daemon
+    /// treats these as internal recall bookkeeping).
+    fn edge_dynamics(s: &SqliteStore, from: &str, to: &str) -> (f64, f64, i64, i64) {
+        s.conn
+            .query_row(
+                "SELECT strength, stability, last_activated, activation_count
+                 FROM relationships WHERE from_id = ?1 AND to_id = ?2",
+                params![from, to],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn add_edge_seeds_fresh_edge_dynamics() {
+        let mut s = SqliteStore::open_in_memory(2).unwrap();
+        s.upsert(&mem("a", "a", "t", vec![1.0, 0.0])).unwrap();
+        s.upsert(&mem("b", "b", "t", vec![0.0, 1.0])).unwrap();
+        s.add_edge("a", "b", EdgeKind::Extends).unwrap();
+        let (strength, stability, last_activated, count) = edge_dynamics(&s, "a", "b");
+        // Defaults + a seeded last_activated so decay measures idle time from creation.
+        assert_eq!((strength, stability, count), (1.0, 1.0, 0));
+        assert!(last_activated > 0, "last_activated seeded to created_at");
+    }
+
+    #[test]
+    fn potentiate_edges_caps_strength_and_gates_stability_on_spacing() {
+        let mut s = SqliteStore::open_in_memory(2).unwrap();
+        s.upsert(&mem("a", "a", "t", vec![1.0, 0.0])).unwrap();
+        s.upsert(&mem("b", "b", "t", vec![0.0, 1.0])).unwrap();
+        s.add_edge("a", "b", EdgeKind::Extends).unwrap();
+        let pair = [("a".to_string(), "b".to_string())];
+
+        // Back-date the edge so the first potentiation is Cepeda-spaced (> SPACING_SECS
+        // since creation) and thus builds durability.
+        let old = now_unix() - dynamics::SPACING_SECS - 10;
+        s.conn
+            .execute(
+                "UPDATE relationships SET last_activated = ?1 WHERE from_id='a' AND to_id='b'",
+                params![old],
+            )
+            .unwrap();
+        let (_, stability_before, _, _) = edge_dynamics(&s, "a", "b");
+
+        s.potentiate_edges(&pair).unwrap(); // spaced → strength up, stability up
+        let (strength, stability_spaced, _, count) = edge_dynamics(&s, "a", "b");
+        assert!(strength > 1.0, "co-access potentiates strength");
+        assert_eq!(count, 1);
+        assert!(
+            stability_spaced > stability_before,
+            "spaced co-access builds edge durability"
+        );
+
+        s.potentiate_edges(&pair).unwrap(); // immediate burst → no stability growth
+        let (_, stability_burst, _, count) = edge_dynamics(&s, "a", "b");
+        assert_eq!(count, 2, "activation_count still tallies bursts");
+        assert_eq!(
+            stability_burst, stability_spaced,
+            "a rapid burst must not build edge durability"
+        );
+
+        // Direction-agnostic: potentiating (b, a) hits the same a→b edge; and strength
+        // is capped at STRENGTH_MAX no matter how many co-accesses land.
+        let reverse = [("b".to_string(), "a".to_string())];
+        for _ in 0..100 {
+            s.potentiate_edges(&reverse).unwrap();
+        }
+        let (strength, ..) = edge_dynamics(&s, "a", "b");
+        assert!(
+            strength <= dynamics::STRENGTH_MAX as f64,
+            "Hebbian cap bounds runaway edge strength"
+        );
+
+        // Unknown pair is a no-op, not an error.
+        s.potentiate_edges(&[("nope".to_string(), "gone".to_string())])
+            .unwrap();
+    }
+
+    #[test]
+    fn graph_search_fresh_edge_outranks_stale_edge() {
+        // Two neighbours each share one entity with the seed and are edge-linked to it, so
+        // only the edge's idle-decay differs: the fresh edge must activate more than the
+        // long-idle one and rank first.
+        let mut s = SqliteStore::open_in_memory(2).unwrap();
+        let tag = "t";
+        for id in ["a", "fresh", "stale"] {
+            s.upsert(&mem(id, "x", tag, vec![1.0, 0.0])).unwrap();
+        }
+        s.link_entities("a", tag, &["e1".into()]).unwrap();
+        s.link_entities("fresh", tag, &["e1".into()]).unwrap();
+        s.link_entities("stale", tag, &["e1".into()]).unwrap();
+        s.add_edge("a", "fresh", EdgeKind::Extends).unwrap();
+        s.add_edge("a", "stale", EdgeKind::Extends).unwrap();
+        // Age the stale edge ~400 days into the past so its strength decays toward the floor.
+        let long_idle = now_unix() - 86_400 * 400;
+        s.conn
+            .execute(
+                "UPDATE relationships SET last_activated = ?1 WHERE to_id = 'stale'",
+                params![long_idle],
+            )
+            .unwrap();
+
+        let g = s.graph_search(tag, &["a".to_string()], 10).unwrap();
+        assert_eq!(g.len(), 2);
+        assert_eq!(
+            g[0].memory.id, "fresh",
+            "a fresh edge outranks a long-idle one"
+        );
+        assert!(g[0].score > g[1].score);
+        assert_eq!(g[1].memory.id, "stale");
+        // Fresh edge ~undecayed: 0.2 shared-entity + 0.85 * ~1.0 = ~1.05 (tolerance absorbs
+        // any sub-second idle between add_edge and this query).
+        assert!((g[0].score - 1.05).abs() < 1e-3, "{}", g[0].score);
+        // Stale edge floored: 0.2 + 0.85 * STRENGTH_FLOOR.
+        let stale_expected = 0.2 + 0.85 * dynamics::STRENGTH_FLOOR;
+        assert!(
+            (g[1].score - stale_expected).abs() < 1e-4,
+            "{} vs {stale_expected}",
+            g[1].score
+        );
     }
 
     #[test]

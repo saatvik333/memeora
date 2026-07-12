@@ -13,9 +13,12 @@
 //! on the read path) and keeps history intact — salience decays, data never vanishes.
 //! The potentiation + spacing half is applied on write by the store's reinforce path.
 //!
+//! Graph **edges** obey the same laws (Phase E): [`decayed_edge_strength`] discounts an
+//! edge's strength by idle time so a long-idle relationship contributes less to the recall
+//! graph channel, and the store's edge-reinforce path potentiates + Cepeda-spaces edges
+//! co-activated in recall ([`EDGE_POTENTIATION_DELTA`] / [`EDGE_STABILITY_DELTA`]).
+//!
 //! Constants are MemPalace's published starting points — tune against real data.
-// ponytail: edge decay (VISION applies this to graph edges too) is deferred — the
-// relationships table has no strength column yet; add it when the graph channel needs it.
 
 use crate::store::Memory;
 
@@ -27,6 +30,14 @@ pub const STRENGTH_FLOOR: f32 = 0.05;
 pub const SPACING_SECS: i64 = 86_400;
 /// Stability gained per spaced reinforcement.
 pub const STABILITY_DELTA: f32 = 1.0;
+
+/// Strength added to a graph edge each time its endpoints are co-activated in recall
+/// (Hebbian potentiation), capped at [`STRENGTH_MAX`]. MemPalace-derived starting point.
+pub const EDGE_POTENTIATION_DELTA: f32 = 0.5;
+/// Edge durability gained per Cepeda-spaced co-activation (accesses ≥ [`SPACING_SECS`]
+/// apart); higher stability ⇒ the edge's strength decays slower, so a repeatedly and
+/// *spaced* co-activated relationship endures. MemPalace-derived starting point.
+pub const EDGE_STABILITY_DELTA: f32 = 1.0;
 
 /// Decay ratio at/above which a memory still reads as well-retained ("stable").
 const FRESH_STABLE_RATIO: f32 = 0.7;
@@ -42,6 +53,22 @@ pub fn decayed_strength(m: &Memory, now: i64) -> f32 {
     let idle_days = (now - m.last_accessed_at).max(0) as f32 / SECONDS_PER_DAY;
     let stability = m.stability.max(0.001); // guard div-by-zero; higher ⇒ slower decay
     (m.strength * (-idle_days / stability).exp()).max(STRENGTH_FLOOR)
+}
+
+/// Effective strength of a graph edge given its stored `strength`, `stability`, and idle
+/// time (`now - last_activated`, seconds), floored at [`STRENGTH_FLOOR`]. Used to weight
+/// the recall graph channel so a long-idle relationship activates less than a fresh one.
+///
+/// Edges use a **hyperbolic** decay `strength / (1 + idle_days/stability)` rather than the
+/// memory model's exponential: it is the same monotone, deterministic, stability-slowed
+/// curve, but expressible in pure SQL arithmetic — so [`crate::store`]'s `graph_search`
+/// can fold decay straight into its ranking aggregation without the optional SQLite math
+/// extension (`exp()`), which this codebase deliberately avoids. This Rust form is the
+/// reference the SQL mirrors exactly.
+pub fn decayed_edge_strength(strength: f32, stability: f32, idle_secs: i64) -> f32 {
+    let idle_days = idle_secs.max(0) as f32 / SECONDS_PER_DAY;
+    let stability = stability.max(0.001); // guard div-by-zero; higher ⇒ slower decay
+    (strength / (1.0 + idle_days / stability)).max(STRENGTH_FLOOR)
 }
 
 /// Coarse freshness/trend label for `m` at `now` (VISION "freshness trends"), derived
@@ -103,6 +130,26 @@ mod tests {
         // Ancient: floored, not zero — data is never truly lost.
         assert_eq!(
             decayed_strength(&mem(1.0, 1.0, now - 86_400 * 365), now),
+            STRENGTH_FLOOR
+        );
+    }
+
+    #[test]
+    fn edge_decay_mirrors_memory_shape() {
+        // Fresh (no idle) reads back the stored strength; idle time discounts it; higher
+        // stability decays slower; and the floor is never breached.
+        assert!((decayed_edge_strength(1.0, 1.0, 0) - 1.0).abs() < 1e-6);
+        let day = 86_400;
+        let fresh = decayed_edge_strength(1.0, 1.0, 0);
+        let idle = decayed_edge_strength(1.0, 1.0, 5 * day);
+        assert!(idle < fresh, "idle edge decays: {idle} < {fresh}");
+        assert!(
+            decayed_edge_strength(1.0, 10.0, 5 * day) > decayed_edge_strength(1.0, 1.0, 5 * day),
+            "higher stability decays slower"
+        );
+        // Ancient edge floors, never zero — the relationship is dimmed, not deleted.
+        assert_eq!(
+            decayed_edge_strength(1.0, 1.0, day * 365 * 100),
             STRENGTH_FLOOR
         );
     }

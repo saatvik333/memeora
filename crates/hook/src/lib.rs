@@ -114,14 +114,47 @@ pub fn capture_ack(desc: &HostDescriptor) -> Option<String> {
 pub const INJECT_PREAMBLE: &str =
     "The following is persistent memory about this user/project. Use it naturally; don't force it.";
 
+/// Trailing line [`format_context`] appends when the wake-up profile overflows
+/// [`WAKE_TOKEN_BUDGET`]. Like [`INJECT_PREAMBLE`], [`strip_injected_memory`] keys on
+/// this same constant so the injector and stripper can't drift.
+pub const INJECT_MORE_MARKER: &str = "…(more via recall)";
+
+/// Token ceiling for the SessionStart wake-up injection. A profile can grow without
+/// bound, but the injected block must stay small so it doesn't crowd the host's
+/// context window — the rest stays reachable via the `recall` tool.
+const WAKE_TOKEN_BUDGET: usize = 800;
+
+/// Rough token estimate (~4 chars/token), mirroring the engine's budget heuristic
+/// (`memeora_core::search::est_tokens`). Kept local so the hook stays daemon-free.
+fn est_tokens(text: &str) -> usize {
+    text.chars().count() / 4 + 1
+}
+
 /// Format a scope's profile into injectable text, or `None` if it's empty.
+///
+/// Bounded to [`WAKE_TOKEN_BUDGET`] tokens: statics before dynamics (importance-first,
+/// as `build_profile` already orders them), stopping before the budget is exceeded and
+/// appending an [`INJECT_MORE_MARKER`] line when anything was dropped.
 pub fn format_context(statics: &[MemoryDto], dynamics: &[MemoryDto]) -> Option<String> {
     if statics.is_empty() && dynamics.is_empty() {
         return None;
     }
     let mut out = format!("{INJECT_PREAMBLE}\n");
+    let mut tokens = est_tokens(&out);
+    let mut truncated = false;
     for m in statics.iter().chain(dynamics.iter()) {
-        out.push_str(&format!("- [{}] {}\n", m.kind, m.content));
+        let line = format!("- [{}] {}\n", m.kind, m.content);
+        let line_tokens = est_tokens(&line);
+        if tokens + line_tokens > WAKE_TOKEN_BUDGET {
+            truncated = true;
+            break;
+        }
+        out.push_str(&line);
+        tokens += line_tokens;
+    }
+    if truncated {
+        out.push_str(INJECT_MORE_MARKER);
+        out.push('\n');
     }
     Some(out)
 }
@@ -187,6 +220,9 @@ pub fn strip_injected_memory(text: &str) -> String {
                     .next_if(|l| l.trim_start().starts_with("- ["))
                     .is_some()
                 {}
+                // Also drop the optional overflow marker that closes a bounded block,
+                // so a truncated wake-up can't echo back through capture either.
+                lines.next_if(|l| l.trim() == INJECT_MORE_MARKER);
             }
             None => kept.push(line),
         }
@@ -568,6 +604,38 @@ mod tests {
     #[test]
     fn format_context_is_none_when_empty() {
         assert!(format_context(&[], &[]).is_none());
+    }
+
+    #[test]
+    fn format_context_caps_large_profile_and_marks_truncation() {
+        // Far more than fits in the wake-up budget.
+        let big: Vec<MemoryDto> = (0..500)
+            .map(|i| {
+                mem(
+                    "fact",
+                    &format!("memory number {i} with some descriptive content"),
+                )
+            })
+            .collect();
+        let out = format_context(&big, &[]).unwrap();
+        // Truncated, and the overflow is explicitly marked.
+        assert!(
+            out.ends_with(&format!("{INJECT_MORE_MARKER}\n")),
+            "overflow not marked: {out}"
+        );
+        // Bounded to ~the budget (plus small slack for the preamble/marker lines).
+        assert!(
+            est_tokens(&out) <= WAKE_TOKEN_BUDGET + est_tokens(INJECT_MORE_MARKER),
+            "not capped: {} tokens",
+            est_tokens(&out)
+        );
+        // The tail memories were dropped (only a prefix of the 500 made it in).
+        assert!(
+            !out.contains("memory number 499"),
+            "tail not dropped: {out}"
+        );
+        // The marker is stripped back out on capture, so it can't echo into memory.
+        assert_eq!(strip_injected_memory(&out), "");
     }
 
     fn mem(kind: &str, content: &str) -> MemoryDto {
