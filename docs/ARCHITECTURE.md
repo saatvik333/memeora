@@ -372,7 +372,7 @@ mismatch. **CI:** `deny.toml` gained `[graph] all-features` + tier-1 `targets` s
 stack's licenses/advisories are actually checked. (Deferred: trimming fastembed's
 `image-models` to drop the NCSA exception.)
 
-**Second hardening pass (after a graphify-guided multi-agent review of steps 8–9).**
+**Second hardening pass (after a multi-agent review of steps 8–9).**
 *Resilience:* `FastEmbedder` recovers a poisoned model lock via `into_inner()` (a
 single embed panic no longer disables embedding daemon-wide); the connection-count
 decrement is an RAII guard so a panic in `prepare`/`handle_conn` (which run off the
