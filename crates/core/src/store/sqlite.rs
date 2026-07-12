@@ -210,8 +210,12 @@ impl SqliteStore {
 ///
 /// FTS5 `MATCH` is a query language, so passing raw text (with `:`, `-`, `"`, `*`,
 /// `NEAR`, …) risks a syntax error that would fail the whole search. We extract
-/// alphanumeric tokens and quote each as a phrase (implicit AND), which can never
-/// be malformed. Returns `None` when there are no usable tokens.
+/// alphanumeric tokens, quote each as a phrase (never malformed), and join with
+/// **`OR`**: as the lexical leg of an RRF hybrid this should maximize recall — a
+/// memory matching *any* term is a candidate, BM25 ranks by term rarity/overlap so
+/// spurious single-term hits sink, and the dense leg supplies precision. (Implicit
+/// AND would require every term in one memory, returning nothing for the common case
+/// where terms are spread across memories.) Returns `None` when there are no tokens.
 fn fts5_match(query: &str) -> Option<String> {
     let tokens: Vec<String> = query
         .split(|c: char| !c.is_alphanumeric())
@@ -219,7 +223,7 @@ fn fts5_match(query: &str) -> Option<String> {
         // Tokens are alphanumeric, so there are no quotes to escape.
         .map(|t| format!("\"{t}\""))
         .collect();
-    (!tokens.is_empty()).then(|| tokens.join(" "))
+    (!tokens.is_empty()).then(|| tokens.join(" OR "))
 }
 
 /// The persisted embedding dim (`meta.embedding_dim`), or `None` before first init.
@@ -841,9 +845,54 @@ impl VectorStore for SqliteStore {
                 })
             },
         )?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
+        let hits = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        // Spread coverage across a *broad* window instead of clustering at its
+        // midpoint (fusion ranks by list position, so this lifts time-spread matches).
+        Ok(temporal_coverage_order(hits, w_start, w_end))
     }
+}
+
+/// Reorder temporal hits (already nearest-to-midpoint first) so a broad window is
+/// covered evenly rather than clustered at its centre. Splits the window into buckets
+/// by occurred-midpoint and interleaves round-robin — bucket 0's best, bucket 1's
+/// best, …, then the second from each — so every part of the window gets a slot near
+/// the front. A narrow window (≤ [`COVERAGE_MIN_SPAN_DAYS`]) or a small result set is
+/// returned unchanged: nearest-first is already right there.
+fn temporal_coverage_order(hits: Vec<ScoredMemory>, w_start: i64, w_end: i64) -> Vec<ScoredMemory> {
+    /// Below this window span, bucketing is pointless (a single day/few days).
+    const COVERAGE_MIN_SPAN_DAYS: i64 = 3;
+    /// Max buckets to spread across (mirrors hindsight's 8-way coverage split).
+    const BUCKETS: usize = 8;
+
+    let span = w_end - w_start;
+    if span <= COVERAGE_MIN_SPAN_DAYS * 86_400 || hits.len() <= 2 {
+        return hits;
+    }
+    let n = BUCKETS.min(hits.len());
+    let mut buckets: Vec<Vec<ScoredMemory>> = vec![Vec::new(); n];
+    for h in hits {
+        let mid = (h.memory.occurred_start.unwrap_or(w_start)
+            + h.memory
+                .occurred_end
+                .unwrap_or_else(|| h.memory.occurred_start.unwrap_or(w_start)))
+            / 2;
+        // Clamp into [0, n): a memory whose interval overlaps the window can have a
+        // midpoint just outside it.
+        let idx = (((mid - w_start).max(0) as i128 * n as i128) / (span as i128 + 1)) as usize;
+        buckets[idx.min(n - 1)].push(h);
+    }
+    // Round-robin: take rank-1 of each non-empty bucket, then rank-2, … (each bucket
+    // is still nearest-first internally, from the SQL ORDER BY).
+    let mut out = Vec::new();
+    let depth = buckets.iter().map(Vec::len).max().unwrap_or(0);
+    for rank in 0..depth {
+        for b in &mut buckets {
+            if let Some(h) = b.get(rank).cloned() {
+                out.push(h);
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -925,6 +974,32 @@ mod tests {
         let hits = s.text_search(tag, "tailwind", 5).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].memory.id, "m1");
+    }
+
+    #[test]
+    fn text_search_ors_terms_for_recall() {
+        // A multi-word query whose terms are spread across different memories must
+        // still recall them (OR semantics) — implicit-AND would return nothing here.
+        let mut s = SqliteStore::open_in_memory(2).unwrap();
+        let tag = "t";
+        s.upsert(&mem("m1", "the user prefers tailwind", tag, vec![1.0, 0.0]))
+            .unwrap();
+        s.upsert(&mem(
+            "m2",
+            "deploy with docker compose",
+            tag,
+            vec![0.0, 1.0],
+        ))
+        .unwrap();
+
+        // No single memory contains all three terms; OR recalls both, AND neither.
+        let hits = s.text_search(tag, "tailwind docker deploy", 5).unwrap();
+        let ids: std::collections::HashSet<&str> =
+            hits.iter().map(|h| h.memory.id.as_str()).collect();
+        assert!(
+            ids.contains("m1") && ids.contains("m2"),
+            "OR recalls both: {ids:?}"
+        );
     }
 
     #[test]
@@ -1597,5 +1672,64 @@ mod tests {
             .unwrap();
         let ids: Vec<&str> = g.iter().map(|m| m.memory.id.as_str()).collect();
         assert_eq!(ids, vec!["in", "near"], "overlapping only, nearest-first");
+    }
+
+    #[test]
+    fn temporal_coverage_spreads_a_broad_window() {
+        // A broad window (a year) with matches clustered at the start plus one late
+        // match: coverage bucketing must lift the late match toward the front rather
+        // than burying it behind the early cluster (nearest-first would rank it last).
+        let day = 86_400;
+        let base = 1_781_000_000;
+        let w_start = base;
+        let w_end = base + 365 * day;
+        let make = |id: &str, mid: i64| {
+            let mut m = mem(id, "x", "t", vec![1.0, 0.0]);
+            m.occurred_start = Some(mid);
+            m.occurred_end = Some(mid);
+            // Score = distance to the window midpoint (as the SQL computes).
+            let w_mid = (w_start + w_end) / 2;
+            ScoredMemory {
+                score: (mid - w_mid).unsigned_abs() as f32,
+                memory: m,
+            }
+        };
+        // Three early (near start) + one late (near end), pre-sorted nearest-to-mid.
+        let early: Vec<_> = vec![
+            make("e1", w_start + 10 * day),
+            make("e2", w_start + 20 * day),
+            make("e3", w_start + 30 * day),
+        ];
+        let late = make("late", w_end - 10 * day);
+        // Nearest-to-midpoint order: the late one is closest to mid, then earlies by mid-dist.
+        let mut hits = vec![late.clone()];
+        hits.extend(early);
+        let ordered = temporal_coverage_order(hits, w_start, w_end);
+        let ids: Vec<&str> = ordered.iter().map(|m| m.memory.id.as_str()).collect();
+        // Every match survives, and the late match lands in the first two slots
+        // (its own bucket's rank-1), not buried after the whole early cluster.
+        assert_eq!(ordered.len(), 4);
+        let late_pos = ids.iter().position(|&i| i == "late").unwrap();
+        assert!(late_pos <= 1, "late match spread to the front: {ids:?}");
+    }
+
+    #[test]
+    fn temporal_coverage_leaves_narrow_windows_untouched() {
+        // A one-day window returns nearest-first unchanged (no bucketing).
+        let day = 86_400;
+        let base = 1_781_000_000;
+        let m = |id: &str, mid: i64| {
+            let mut mm = mem(id, "x", "t", vec![1.0, 0.0]);
+            mm.occurred_start = Some(mid);
+            mm.occurred_end = Some(mid);
+            ScoredMemory {
+                score: 0.0,
+                memory: mm,
+            }
+        };
+        let hits = vec![m("a", base), m("b", base + day / 2), m("c", base + day)];
+        let ordered = temporal_coverage_order(hits, base, base + day);
+        let ids: Vec<&str> = ordered.iter().map(|m| m.memory.id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "b", "c"], "narrow window is unchanged");
     }
 }

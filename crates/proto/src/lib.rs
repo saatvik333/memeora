@@ -44,6 +44,9 @@ pub mod capability {
     /// Single-call context bundle ([`Request::Bundle`]): a scope's profile
     /// (statics + dynamics) plus the query's recall results in one round-trip.
     pub const BUNDLE: &str = "bundle";
+    /// On-demand consolidation ([`Request::Consolidate`]): distil a scope's
+    /// near-duplicate memories into distinct-source-proofed observations.
+    pub const CONSOLIDATE: &str = "consolidate";
 
     /// The full set a current daemon supports. Returned by the daemon in its
     /// handshake; kept here so client and server agree on the canonical list.
@@ -57,6 +60,7 @@ pub mod capability {
         TOKEN_BUDGET,
         EVIDENCE,
         BUNDLE,
+        CONSOLIDATE,
     ];
 }
 
@@ -163,6 +167,12 @@ pub enum Request {
         /// Memory id.
         id: String,
     },
+    /// Consolidate a scope: cluster near-duplicate memories into distinct-source-proofed
+    /// observations. Additive; gate on the `consolidate` capability.
+    Consolidate {
+        /// Scope to consolidate.
+        scope: Scope,
+    },
 }
 
 /// A response from the daemon to a client.
@@ -220,6 +230,13 @@ pub enum Response {
     },
     /// Acknowledgement for an [`Request::Forget`].
     Forgotten,
+    /// Result of an [`Request::Consolidate`].
+    Consolidated {
+        /// Observations written (one per near-duplicate cluster, upserts included).
+        observations: usize,
+        /// Total (observation, source-memory) links recorded.
+        sources_linked: usize,
+    },
     /// The request failed.
     Error {
         /// Human-readable error message.

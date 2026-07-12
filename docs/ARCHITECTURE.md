@@ -285,8 +285,9 @@ memeora must be **easy for the open-source community to extend to new harnesses*
 > for future-dated deadlines on Fact/Episode kinds, never Preferences; the existing expiry filter
 > drops them, nothing deleted), and a hook **anti-feedback strip** (`strip_injected_memory` keyed
 > on the shared `INJECT_PREAMBLE` const) so a captured transcript can't re-ingest memeora's own
-> injected context. *(Deferred, pending harness-measured evidence: temporal-coverage bucketing,
-> date-augmented embeddings, fuzzy entity resolution, synthetic recall-decoy docs.)*
+> injected context. *(Deferred, pending harness-measured evidence: date-augmented embeddings,
+> synthetic recall-decoy docs. Temporal-coverage bucketing + fuzzy entity resolution have since
+> landed — see the deferred-items pass below.)*
 
 > **Steal-program — Phases D–E (2026-07-12, on `main`).** **(D) Single-call context bundle**
 > (supermemory's flagship DX): additive `Request::Bundle {scope, query, k, max_tokens}` →
@@ -323,11 +324,36 @@ memeora must be **easy for the open-source community to extend to new harnesses*
 > member, and both writes are set-unions, so re-running converges. The belief text comes from an
 > `ObservationSynthesizer` trait; the shipped `PassthroughSynthesizer` (longest member verbatim)
 > needs no LLM, and an LLM impl (mirroring `extract::llm`'s consent-gated transport) is a clean
-> opt-in swap. *(Deferred, marked in code: the LLM synthesizer impl; the daemon/CLI trigger — the
-> core exposes `consolidate(...)`; a periodic/on-demand "distil scope" writer-actor job wires it,
-> passing the passthrough by default and an LLM synthesizer only under an allowed `LlmConfig`.)*
-> **The A–F steal program is complete through its no-LLM tier; the remaining LLM-tier work
-> (synthesizer impl + auto-trigger) is scoped and deferred, not blocking.**
+> opt-in swap. *(The LLM synthesizer impl + the daemon/CLI trigger have since landed — see the
+> deferred-items pass below.)*
+> **The A–F steal program is complete through its no-LLM tier, and the scoped LLM-tier follow-ups
+> (synthesizer impl + consolidate trigger) have since landed too.**
+
+> **Steal-program — deferred-items pass (2026-07-12, on `feat/steal-program-def`).** Cleared the
+> code-marked deferrals that were safe to land without new harness evidence. **(1) FTS recall
+> semantics** — `fts5_match` now joins tokens with `OR`, not implicit `AND`: as the lexical leg of an
+> RRF hybrid, a memory matching *any* query term is a legitimate candidate (BM25 sinks spurious
+> single-term hits by term-rarity/overlap; the dense leg supplies precision). Implicit AND returned
+> nothing for the common case where a query's terms are spread across separate memories. **(2)
+> Temporal-coverage bucketing** — `temporal_search` now spreads a *broad* window's hits across up to
+> 8 occurred-midpoint buckets, round-robin interleaved, so time-spread matches surface near the front
+> of the fused list instead of clustering at the window midpoint; a narrow window (≤3 days) or ≤2
+> hits is returned unchanged (nearest-first is already right). **(3) Fuzzy entity resolution (safe
+> subset)** — `entity::canonicalize` folds trivially-equivalent surfaces onto one canonical entity:
+> a curated alias allowlist (`postgresql→postgres`, `js→javascript`, `ts→typescript`,
+> `k8s→kubernetes`) + naive singular/plural folding applied **only** to plain all-letter words
+> (anything with a path separator, dot, underscore, or digit keeps its surface verbatim — a trailing
+> `s` in `sqlite.rs`/`has_access` is load-bearing). Trigram/edit-distance matching is deliberately
+> still omitted: a false merge links *unrelated* memories, worse than a miss. **(4) LLM observation
+> synthesizer** — `consolidate::llm::LlmSynthesizer` reuses `extract::llm`'s consent-gated
+> `LlmConfig`/`HttpTransport` to distil a cluster's members into one canonical belief sentence, and
+> **fails open** to the `PassthroughSynthesizer` on any disallowed/failed/empty path (never a hard
+> dependency; fallback stays deterministic so re-consolidation is idempotent). **(5) Consolidation
+> trigger** — a new `consolidate` op (proto `Request::Consolidate`/`Response::Consolidated` +
+> capability token; client + `memeora consolidate <scope>` CLI) runs the distil job on the
+> writer-actor; the daemon swaps in the `LlmSynthesizer` under the same `LlmConfig` gate as the
+> extractor, else the passthrough. *(Still deferred, needs harness evidence: date-augmented
+> embeddings, synthetic recall-decoy docs, and the recall→edge-potentiate write-back.)*
 
 **Post-review hardening (applied after a full codebase review):** `upsert` is now an
 edge-preserving in-place UPDATE (delete-then-insert previously cascade-deleted a node's

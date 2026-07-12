@@ -10,6 +10,7 @@ use std::error::Error;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
+use memeora_core::consolidate::LlmSynthesizer;
 use memeora_core::embed::fastembed::FastEmbedder;
 use memeora_core::search::fastembed::FastEmbedReranker;
 use memeora_core::{
@@ -192,6 +193,18 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         }
     } else {
         engine
+    };
+
+    // Consolidation belief-text synthesizer: the same LLM config that gates the
+    // extractor also gates this. When enabled+allowed, the LLM synthesizer is used
+    // (it fails open to the passthrough on any error, so it's never a hard dependency);
+    // otherwise consolidation uses the no-LLM passthrough (longest member verbatim).
+    let engine = match LlmConfig::from_env() {
+        Some(cfg) if cfg.is_allowed() => {
+            eprintln!("memeora-daemon: LLM observation synthesizer enabled");
+            engine.with_synthesizer(Box::new(LlmSynthesizer::new(cfg)))
+        }
+        _ => engine,
     };
 
     let socket = std::env::var("MEMEORA_SOCKET").unwrap_or_else(|_| DEFAULT_SOCKET.to_string());

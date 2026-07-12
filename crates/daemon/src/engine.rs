@@ -12,9 +12,10 @@
 use std::sync::Arc;
 
 use memeora_core::{
-    Candidate, EmbeddingProvider, Extractor, IngestParams, Memory, MemoryKind, PreparedCandidate,
-    ProfileCache, Reranker, ScoredMemory, SearchParams, SqliteStore, VectorStore, embed_candidates,
-    freshness, ingest_prepared, now_unix, rerank_memories, sanitize, search,
+    Candidate, ConsolidationParams, EmbeddingProvider, Extractor, IngestParams, Memory, MemoryKind,
+    ObservationSynthesizer, PassthroughSynthesizer, PreparedCandidate, ProfileCache, Reranker,
+    ScoredMemory, SearchParams, SqliteStore, VectorStore, consolidate, embed_candidates, freshness,
+    ingest_prepared, now_unix, rerank_memories, sanitize, search,
 };
 use memeora_proto::{MemoryDto, PROTOCOL_VERSION, Request, Response};
 use tokio::sync::broadcast;
@@ -69,6 +70,9 @@ pub(crate) enum Prepared {
     },
     Forget {
         id: String,
+    },
+    Consolidate {
+        scope: String,
     },
 }
 
@@ -166,6 +170,9 @@ impl Preparer {
             }
             Request::List { scope, limit } => Prepared::List { scope, limit },
             Request::Forget { id } => Prepared::Forget { id },
+            // Consolidation re-embeds cluster members itself on the write side (it needs
+            // the store's KNN), so there's nothing to prepare off-thread here.
+            Request::Consolidate { scope } => Prepared::Consolidate { scope },
         })
     }
 }
@@ -182,6 +189,9 @@ pub struct Engine {
     /// larger candidate pool and re-scores it jointly against the query for a quality
     /// upgrade; when absent, recall is exactly the fused [`search`] result.
     reranker: Option<Box<dyn Reranker>>,
+    /// Belief-text synthesizer for consolidation. Defaults to the no-LLM
+    /// [`PassthroughSynthesizer`]; the daemon swaps in an LLM one when configured.
+    synthesizer: Box<dyn ObservationSynthesizer>,
     /// Optional sink for [`ChangeEvent`]s, set by the daemon when the dashboard is
     /// enabled. `send` is best-effort: an error just means no live listeners.
     events: Option<broadcast::Sender<ChangeEvent>>,
@@ -204,6 +214,7 @@ impl Engine {
             ingest_params: IngestParams::default(),
             search_params: SearchParams::default(),
             reranker: None,
+            synthesizer: Box::new(PassthroughSynthesizer),
             events: None,
             #[cfg(test)]
             panic_once: None,
@@ -214,6 +225,13 @@ impl Engine {
     /// Opt-in: without this, recall is byte-identical to the plain [`search`] path.
     pub fn with_reranker(mut self, reranker: Box<dyn Reranker>) -> Self {
         self.reranker = Some(reranker);
+        self
+    }
+
+    /// Swap in a belief-text synthesizer for consolidation (e.g. the opt-in LLM one).
+    /// Without this, consolidation uses the no-LLM [`PassthroughSynthesizer`].
+    pub fn with_synthesizer(mut self, synthesizer: Box<dyn ObservationSynthesizer>) -> Self {
+        self.synthesizer = synthesizer;
         self
     }
 
@@ -461,6 +479,26 @@ impl Engine {
                 }
                 Response::Forgotten
             }
+
+            Prepared::Consolidate { scope } => {
+                // Distil the scope's near-duplicate memories into observations. Idempotent
+                // and per-observation atomic (no outer transaction needed); re-embeds
+                // cluster members itself. Disjoint field borrows: store (mut) vs
+                // embedder/synthesizer (shared).
+                let params = ConsolidationParams::default();
+                let outcome = consolidate(
+                    &mut self.store,
+                    self.embedder.as_ref(),
+                    self.synthesizer.as_ref(),
+                    &scope,
+                    &params,
+                )?;
+                self.profiles.invalidate(&scope);
+                Response::Consolidated {
+                    observations: outcome.observations,
+                    sources_linked: outcome.sources_linked,
+                }
+            }
         })
     }
 }
@@ -683,6 +721,63 @@ mod tests {
                     memories.iter().all(|m| m.id != pref_id),
                     "static leaked into memories: {memories:?}"
                 );
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn consolidate_distils_near_duplicates_into_an_observation() {
+        // Two cross-kind near-duplicates (same embedding, different kind — so ingest's
+        // same-kind dedup does NOT merge them at Add time) plus an unrelated memory: the
+        // consolidate op clusters the duplicates into one proof-counted observation and
+        // leaves the singleton as its own. Uses the default PassthroughSynthesizer.
+        let mut e = engine(&[
+            ("the user prefers postgres", vec![1.0, 0.0, 0.0]),
+            ("postgres is the chosen database", vec![1.0, 0.0, 0.0]),
+            ("deploys with docker", vec![0.0, 1.0, 0.0]),
+        ]);
+        let scope = "s";
+        for (content, kind) in [
+            ("the user prefers postgres", "preference"),
+            ("postgres is the chosen database", "fact"),
+            ("deploys with docker", "fact"),
+        ] {
+            e.handle(Request::Add {
+                scope: scope.into(),
+                content: content.into(),
+                kind: kind.into(),
+            });
+        }
+
+        match e.handle(Request::Consolidate {
+            scope: scope.into(),
+        }) {
+            Response::Consolidated {
+                observations,
+                sources_linked,
+            } => {
+                // Two clusters (the postgres pair + the docker singleton) → 2 observations,
+                // 3 source links total.
+                assert_eq!(
+                    observations, 2,
+                    "postgres pair collapses, docker stands alone"
+                );
+                assert_eq!(sources_linked, 3);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        // Idempotent: re-running converges (same observations, same links, no duplicates).
+        match e.handle(Request::Consolidate {
+            scope: scope.into(),
+        }) {
+            Response::Consolidated {
+                observations,
+                sources_linked,
+            } => {
+                assert_eq!(observations, 2);
+                assert_eq!(sources_linked, 3);
             }
             other => panic!("unexpected: {other:?}"),
         }

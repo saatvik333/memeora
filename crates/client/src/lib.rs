@@ -242,6 +242,21 @@ impl Client {
             other => Err(unexpected(other)),
         }
     }
+
+    /// Consolidate a scope: distil its near-duplicate memories into distinct-source-proofed
+    /// observations. Returns `(observations, sources_linked)`. Idempotent — re-running
+    /// converges. Gate on the `consolidate` capability.
+    pub fn consolidate(&mut self, scope: &str) -> io::Result<(usize, usize)> {
+        match self.call(&Request::Consolidate {
+            scope: scope.to_string(),
+        })? {
+            Response::Consolidated {
+                observations,
+                sources_linked,
+            } => Ok((observations, sources_linked)),
+            other => Err(unexpected(other)),
+        }
+    }
 }
 
 /// Normalize a socket-deadline expiry into a clear [`io::ErrorKind::TimedOut`]

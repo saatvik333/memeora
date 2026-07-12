@@ -14,10 +14,15 @@
 //! source can't inflate `proof_count` (set-union via the composite PK, mirroring the
 //! `record_evidence`/`proof_count` model).
 //
+// The LLM synthesizer tier now exists: [`llm::LlmSynthesizer`] (opt-in, fail-open).
 // ponytail: nothing auto-triggers this — a daemon/CLI trigger is deliberately out of scope
 // for the core crate. Wire a `consolidate(...)` call into the daemon (e.g. a periodic or
 // on-demand "distil scope" job on the writer-actor, passing a `PassthroughSynthesizer` by
-// default and an LLM synthesizer only when `LlmConfig` is present and allowed).
+// default and a `LlmSynthesizer` only when `LlmConfig` is present and allowed).
+
+pub mod llm;
+
+pub use llm::LlmSynthesizer;
 
 use std::collections::HashMap;
 
@@ -28,10 +33,12 @@ use crate::store::{Observation, VectorStore, now_unix};
 
 /// Turns a cluster of near-duplicate member texts into one canonical belief sentence.
 ///
-/// The default [`PassthroughSynthesizer`] needs no LLM. An LLM implementation (mirroring
-/// [`crate::extract::llm`]'s transport + consent gate) can be swapped in behind the same
-/// trait so consolidation stays fully optional and tests use the passthrough.
-pub trait ObservationSynthesizer {
+/// The default [`PassthroughSynthesizer`] needs no LLM. The opt-in [`llm::LlmSynthesizer`]
+/// (reusing [`crate::extract::llm`]'s transport + consent gate) can be swapped in behind the
+/// same trait so consolidation stays fully optional and tests use the passthrough.
+///
+/// `Send + Sync` so the daemon can hold one on its writer-actor thread (like `Reranker`).
+pub trait ObservationSynthesizer: Send + Sync {
     /// Return one canonical belief sentence for a cluster's `members` (never empty).
     fn synthesize(&self, members: &[&str]) -> Result<String>;
 }
