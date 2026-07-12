@@ -8,8 +8,8 @@ use crate::db;
 use crate::dynamics;
 use crate::error::{Error, Result};
 use crate::store::{
-    EdgeKind, GraphData, Memory, MemoryKind, Relationship, ScopeInfo, ScoredMemory, VectorStore,
-    now_unix,
+    EdgeKind, GraphData, Memory, MemoryKind, Observation, Relationship, ScopeInfo, ScoredMemory,
+    VectorStore, now_unix,
 };
 
 /// SQLite store. Owns one connection (the daemon keeps a single writer; see ARCHITECTURE.md).
@@ -509,6 +509,80 @@ impl VectorStore for SqliteStore {
                 (SELECT COUNT(DISTINCT source_id) FROM evidence WHERE memory_id = ?1)
              WHERE id = ?1",
             params![memory_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn upsert_observation(&mut self, observation: &Observation) -> Result<()> {
+        // ON CONFLICT keeps the original `created_at` (absent from the SET list) but
+        // refreshes content/scope/proof_count/updated_at, so re-consolidating the same
+        // cluster updates in place rather than duplicating. `proof_count` here is a hint;
+        // `add_observation_source` recomputes it authoritatively from the source set.
+        self.conn.execute(
+            "INSERT INTO observations
+                (id, container_tag, content, proof_count, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(id) DO UPDATE SET
+                container_tag = excluded.container_tag,
+                content       = excluded.content,
+                proof_count   = excluded.proof_count,
+                updated_at    = excluded.updated_at",
+            params![
+                observation.id,
+                observation.container_tag,
+                observation.content,
+                observation.proof_count as i64,
+                observation.created_at,
+                observation.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn list_observations(&self, container_tag: &str, limit: usize) -> Result<Vec<Observation>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, container_tag, content, proof_count, created_at, updated_at
+             FROM observations
+             WHERE container_tag = ?1
+             ORDER BY updated_at DESC, id
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![container_tag, limit as i64], |row| {
+            Ok(Observation {
+                id: row.get(0)?,
+                container_tag: row.get(1)?,
+                content: row.get(2)?,
+                proof_count: row.get::<_, i64>(3)? as u32,
+                created_at: row.get(4)?,
+                updated_at: row.get(5)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    fn add_observation_source(
+        &mut self,
+        observation_id: &str,
+        source_memory_id: &str,
+    ) -> Result<()> {
+        // Exact mirror of `record_evidence`: two writes as a unit (SAVEPOINT nests in the
+        // daemon batch), set-union the source via the composite PK, then recompute (not +1)
+        // proof_count to the distinct-source count — so re-linking a known source is idempotent.
+        let tx = self.conn.savepoint()?;
+        tx.execute(
+            "INSERT OR IGNORE INTO observation_sources (observation_id, source_memory_id)
+             VALUES (?1, ?2)",
+            params![observation_id, source_memory_id],
+        )?;
+        tx.execute(
+            "UPDATE observations SET
+                proof_count = (SELECT COUNT(DISTINCT source_memory_id)
+                               FROM observation_sources WHERE observation_id = ?1),
+                updated_at = ?2
+             WHERE id = ?1",
+            params![observation_id, now_unix()],
         )?;
         tx.commit()?;
         Ok(())

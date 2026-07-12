@@ -306,8 +306,28 @@ memeora must be **easy for the open-source community to extend to new harnesses*
 > spacing on stability) is a tested write-path primitive. *(Deferred, by design: the recall→
 > potentiate write-back — the daemon deliberately never mutates on the read path, so edge
 > potentiation belongs on a write-path co-access hook; edge-decay's ranking impact wants Phase-A
-> harness validation. Phase F — local rerank wiring + the opt-in LLM consolidation→observations
-> loop — is next.)*
+> harness validation.)*
+
+> **Steal-program — Phase F (2026-07-12, on `main`).** The opt-in quality/LLM tier.
+> **(F-rerank) Local cross-encoder rerank wired into recall** — the daemon holds an
+> `Option<Box<dyn Reranker>>`, loaded from the existing `FastEmbedReranker` (BGE-reranker-base,
+> shares the fastembed ONNX stack) only when `MEMEORA_RERANK` is set; a load failure degrades to
+> no reranking, never crashes. A shared `Engine::recall_hits` over-fetches `k·candidate_multiplier`,
+> reranks, and keeps `k` — used by **both** Recall and Bundle. The default (no env) path is
+> byte-identical to before. **(F-consolidation) Observation layer** (hindsight) — a migration adds
+> `observations` + `observation_sources` (one level up from `evidence`: `proof_count` is a
+> denormalized `COUNT(DISTINCT source_memory_id)`). `consolidate::consolidate` greedily clusters a
+> scope's latest memories by vector KNN at ingest's own near-duplicate threshold (L2 ≤ 0.2, the
+> real engine convention — **not** cosine) and writes one observation per cluster, sources = members.
+> Deterministic + idempotent: the observation id is keyed on the cluster's lexicographically-smallest
+> member, and both writes are set-unions, so re-running converges. The belief text comes from an
+> `ObservationSynthesizer` trait; the shipped `PassthroughSynthesizer` (longest member verbatim)
+> needs no LLM, and an LLM impl (mirroring `extract::llm`'s consent-gated transport) is a clean
+> opt-in swap. *(Deferred, marked in code: the LLM synthesizer impl; the daemon/CLI trigger — the
+> core exposes `consolidate(...)`; a periodic/on-demand "distil scope" writer-actor job wires it,
+> passing the passthrough by default and an LLM synthesizer only under an allowed `LlmConfig`.)*
+> **The A–F steal program is complete through its no-LLM tier; the remaining LLM-tier work
+> (synthesizer impl + auto-trigger) is scoped and deferred, not blocking.**
 
 **Post-review hardening (applied after a full codebase review):** `upsert` is now an
 edge-preserving in-place UPDATE (delete-then-insert previously cascade-deleted a node's

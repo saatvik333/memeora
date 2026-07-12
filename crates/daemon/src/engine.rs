@@ -13,8 +13,8 @@ use std::sync::Arc;
 
 use memeora_core::{
     Candidate, EmbeddingProvider, Extractor, IngestParams, Memory, MemoryKind, PreparedCandidate,
-    ProfileCache, ScoredMemory, SearchParams, SqliteStore, VectorStore, embed_candidates,
-    freshness, ingest_prepared, now_unix, sanitize, search,
+    ProfileCache, Reranker, ScoredMemory, SearchParams, SqliteStore, VectorStore, embed_candidates,
+    freshness, ingest_prepared, now_unix, rerank_memories, sanitize, search,
 };
 use memeora_proto::{MemoryDto, PROTOCOL_VERSION, Request, Response};
 use tokio::sync::broadcast;
@@ -178,6 +178,10 @@ pub struct Engine {
     profiles: ProfileCache,
     ingest_params: IngestParams,
     search_params: SearchParams,
+    /// Optional cross-encoder reranker (opt-in). When present, recall over-fetches a
+    /// larger candidate pool and re-scores it jointly against the query for a quality
+    /// upgrade; when absent, recall is exactly the fused [`search`] result.
+    reranker: Option<Box<dyn Reranker>>,
     /// Optional sink for [`ChangeEvent`]s, set by the daemon when the dashboard is
     /// enabled. `send` is best-effort: an error just means no live listeners.
     events: Option<broadcast::Sender<ChangeEvent>>,
@@ -199,10 +203,18 @@ impl Engine {
             profiles: ProfileCache::with_defaults(),
             ingest_params: IngestParams::default(),
             search_params: SearchParams::default(),
+            reranker: None,
             events: None,
             #[cfg(test)]
             panic_once: None,
         }
+    }
+
+    /// Attach a cross-encoder reranker so recall re-scores its fused candidates.
+    /// Opt-in: without this, recall is byte-identical to the plain [`search`] path.
+    pub fn with_reranker(mut self, reranker: Box<dyn Reranker>) -> Self {
+        self.reranker = Some(reranker);
+        self
     }
 
     /// Attach a [`ChangeEvent`] sink so mutations are broadcast to the dashboard's
@@ -263,6 +275,43 @@ impl Engine {
                 message: err.to_string(),
             },
         }
+    }
+
+    /// Run recall, applying the optional reranker. Reranking is CPU-bound and this
+    /// runs on the engine's writer thread (a blocking context), matching where
+    /// `search` already runs — so it never blocks a tokio worker.
+    ///
+    /// Without a reranker this is exactly `search` with the caller's `k`/`max_tokens`
+    /// (byte-identical to the pre-rerank path). With one, it over-fetches a larger
+    /// candidate pool (`k * candidate_multiplier`), re-scores it jointly against the
+    /// query, and keeps the top `k`. The token budget still caps the over-fetched
+    /// pool, so the reranked subset stays within budget.
+    fn recall_hits(
+        &self,
+        scope: &str,
+        query: &str,
+        query_embedding: &[f32],
+        k: usize,
+        max_tokens: Option<usize>,
+    ) -> memeora_core::Result<Vec<ScoredMemory>> {
+        let Some(reranker) = &self.reranker else {
+            let params = SearchParams {
+                k,
+                max_tokens,
+                ..self.search_params.clone()
+            };
+            return search(&self.store, scope, query_embedding, query, &params);
+        };
+        let pool = k
+            .saturating_mul(self.search_params.candidate_multiplier)
+            .max(k);
+        let params = SearchParams {
+            k: pool,
+            max_tokens,
+            ..self.search_params.clone()
+        };
+        let candidates = search(&self.store, scope, query_embedding, query, &params)?;
+        rerank_memories(reranker.as_ref(), query, &candidates, k)
     }
 
     fn dispatch(&mut self, prepared: Prepared) -> memeora_core::Result<Response> {
@@ -326,12 +375,7 @@ impl Engine {
                 k,
                 max_tokens,
             } => {
-                let params = SearchParams {
-                    k,
-                    max_tokens,
-                    ..self.search_params.clone()
-                };
-                let hits = search(&self.store, &scope, &query_embedding, &query, &params)?;
+                let hits = self.recall_hits(&scope, &query, &query_embedding, k, max_tokens)?;
                 let now = now_unix();
                 Response::Memories {
                     memories: hits.iter().map(|h| scored_to_dto(h, now)).collect(),
@@ -366,12 +410,7 @@ impl Engine {
                 // profile comes from the same cache Context uses, the recall from the
                 // same `search` Recall uses.
                 let profile = self.profiles.get_or_build(&self.store, &scope)?;
-                let params = SearchParams {
-                    k,
-                    max_tokens,
-                    ..self.search_params.clone()
-                };
-                let hits = search(&self.store, &scope, &query_embedding, &query, &params)?;
+                let hits = self.recall_hits(&scope, &query, &query_embedding, k, max_tokens)?;
                 let now = now_unix();
 
                 // Dedup by id with priority static > dynamic > search: strip anything
@@ -451,8 +490,35 @@ fn scored_to_dto(scored: &ScoredMemory, now: i64) -> MemoryDto {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use memeora_core::{EmbeddingSpace, HeuristicExtractor};
+    use memeora_core::{EmbeddingSpace, HeuristicExtractor, RerankHit};
     use std::collections::HashMap;
+
+    /// Deterministic mock reranker: scores each candidate by its input position so the
+    /// output is the exact reverse of the fused order. No model download — this proves
+    /// the wiring (the engine adopts whatever order the reranker dictates).
+    struct ReverseReranker;
+
+    impl Reranker for ReverseReranker {
+        fn rerank(
+            &self,
+            _query: &str,
+            docs: &[&str],
+            top_k: usize,
+        ) -> memeora_core::Result<Vec<RerankHit>> {
+            // Higher score = earlier: score by index so the LAST candidate ranks first.
+            let mut hits: Vec<RerankHit> = docs
+                .iter()
+                .enumerate()
+                .map(|(i, _)| RerankHit {
+                    index: i,
+                    score: i as f32,
+                })
+                .collect();
+            hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+            hits.truncate(top_k);
+            Ok(hits)
+        }
+    }
 
     /// Deterministic embedder: prescribed vectors per text, distinct fallback.
     struct MapEmbedder {
@@ -708,5 +774,49 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn reranker_dictates_recall_order() {
+        // Two memories give a deterministic fused order. A reversing reranker must flip
+        // it; an engine without one must return the untouched fused order.
+        let pairs: &[(&str, Vec<f32>)] = &[
+            ("alpha memory", vec![1.0, 0.0, 0.0]),
+            ("beta memory", vec![0.0, 1.0, 0.0]),
+        ];
+        let scope = "s";
+
+        // Seed identical data into an engine, then recall the ids in order.
+        let seed_and_recall = |mut e: Engine| -> Vec<String> {
+            for (content, _) in pairs {
+                e.handle(Request::Add {
+                    scope: scope.into(),
+                    content: (*content).into(),
+                    kind: "fact".into(),
+                });
+            }
+            match e.handle(Request::Recall {
+                scope: scope.into(),
+                query: "alpha memory".into(),
+                k: 5,
+                max_tokens: None,
+            }) {
+                Response::Memories { memories } => memories.into_iter().map(|m| m.id).collect(),
+                other => panic!("unexpected: {other:?}"),
+            }
+        };
+
+        // Baseline (no reranker): the natural fused order.
+        let base = seed_and_recall(engine(pairs));
+        assert_eq!(base.len(), 2, "both memories recalled");
+
+        // With the reversing reranker: the exact reverse of the baseline order.
+        let reranked = seed_and_recall(engine(pairs).with_reranker(Box::new(ReverseReranker)));
+        let mut expected = base.clone();
+        expected.reverse();
+        assert_eq!(
+            reranked, expected,
+            "recall must adopt the reranker's dictated order"
+        );
     }
 }

@@ -172,6 +172,31 @@ impl EdgeKind {
     }
 }
 
+/// A consolidated observation: one canonical belief distilled from a cluster of
+/// near-duplicate memories, corroborated by a set of distinct source memories.
+///
+/// The observation layer sits one level above [`Memory`]: [`crate::consolidate`]
+/// groups a scope's near-duplicate memories and writes one observation per cluster.
+/// `proof_count` is a denormalized `COUNT(DISTINCT source_memory_id)` over the
+/// observation's source set (mirroring the per-memory evidence/proof model), refreshed
+/// by [`add_observation_source`](VectorStore::add_observation_source).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Observation {
+    /// Stable, deterministic id (keyed on the cluster's canonical member — see
+    /// [`crate::consolidate`] — so re-consolidating the same memories converges).
+    pub id: String,
+    /// Scope (see [`crate::container_tag`]).
+    pub container_tag: String,
+    /// The canonical belief text (the synthesizer's output for the cluster).
+    pub content: String,
+    /// Distinct source memories corroborating this observation.
+    pub proof_count: u32,
+    /// Creation time (Unix seconds); preserved across re-consolidation.
+    pub created_at: i64,
+    /// Last time the observation's content or sources changed (Unix seconds).
+    pub updated_at: i64,
+}
+
 /// Summary of one scope/container, for the dashboard's spaces switcher.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScopeInfo {
@@ -246,6 +271,35 @@ pub trait VectorStore {
         _source_id: &str,
         _quote: &str,
         _occurred_at: i64,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    /// Insert or update a consolidated [`Observation`] (matched by `id`). On update the
+    /// original `created_at` is preserved; `content`, `container_tag`, `proof_count`, and
+    /// `updated_at` are refreshed. `proof_count` is authoritatively (re)set by
+    /// [`add_observation_source`](VectorStore::add_observation_source); the value written
+    /// here is a hint. Default: no-op, for stores without an observation table.
+    fn upsert_observation(&mut self, _observation: &Observation) -> Result<()> {
+        Ok(())
+    }
+
+    /// List observations in `container_tag`, most-recently-updated first, up to `limit`.
+    /// Default: empty, for stores without an observation table.
+    fn list_observations(&self, _container_tag: &str, _limit: usize) -> Result<Vec<Observation>> {
+        Ok(Vec::new())
+    }
+
+    /// Record `source_memory_id` as a distinct source for `observation_id`: insert into
+    /// the source set (set-union via the composite PK — a repeated source is a no-op) and
+    /// refresh the observation's `proof_count` to the distinct-source count. This mirrors
+    /// [`record_evidence`](VectorStore::record_evidence) one level up: independent sources
+    /// raise proof, re-linking a known source does not — which is what makes re-running
+    /// consolidation idempotent. Default: no-op, for stores without an observation table.
+    fn add_observation_source(
+        &mut self,
+        _observation_id: &str,
+        _source_memory_id: &str,
     ) -> Result<()> {
         Ok(())
     }

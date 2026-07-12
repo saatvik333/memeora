@@ -100,6 +100,32 @@ fn migrations() -> Migrations<'static> {
              ALTER TABLE relationships ADD COLUMN activation_count INTEGER NOT NULL DEFAULT 0;
              UPDATE relationships SET last_activated = created_at WHERE last_activated IS NULL;",
         ),
+        // Observation-consolidation layer (Phase F): raw memories distilled into
+        // deduplicated canonical `observations`, each corroborated by a set of distinct
+        // source memories. This mirrors the `evidence`/`proof_count` model one level up:
+        // `observation_sources` is one row per (observation, distinct source memory), and
+        // `observations.proof_count` is a denormalized `COUNT(DISTINCT source_memory_id)`
+        // cache refreshed by `add_observation_source`. The composite PK makes re-linking a
+        // known source a set-union no-op, so re-running consolidation can't inflate proof.
+        // Both FKs cascade so a hard-deleted observation/source can't orphan a link row
+        // (memories are only soft-forgotten, so this rarely fires — it's integrity, not GC).
+        M::up(
+            "CREATE TABLE observations (
+            id            TEXT NOT NULL PRIMARY KEY,
+            container_tag TEXT NOT NULL,
+            content       TEXT NOT NULL,
+            proof_count   INTEGER NOT NULL DEFAULT 1,
+            created_at    INTEGER NOT NULL,
+            updated_at    INTEGER NOT NULL
+        );
+        CREATE INDEX idx_observations_container ON observations(container_tag);
+        CREATE TABLE observation_sources (
+            observation_id   TEXT NOT NULL REFERENCES observations(id) ON DELETE CASCADE,
+            source_memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+            PRIMARY KEY (observation_id, source_memory_id)
+        );
+        CREATE INDEX idx_observation_sources_source ON observation_sources(source_memory_id);",
+        ),
     ])
 }
 
