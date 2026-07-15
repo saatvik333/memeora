@@ -45,8 +45,6 @@ lto = "thin"
 # Pinned so CI uses exactly the dist that generated `release.yml` (regenerate on bump).
 cargo-dist-version = "0.32.0"
 ci = ["github"]
-# The workflow has reviewed hardening and dashboard-build steps beyond dist's template.
-allow-dirty = ["ci"]
 # curl|sh + PowerShell are the always-works baseline; Homebrew + npm are wrappers.
 installers = ["shell", "powershell", "homebrew", "npm"]
 tap = "saatvik333/homebrew-tap"
