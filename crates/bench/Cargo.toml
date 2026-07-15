@@ -11,6 +11,9 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[package.metadata.dist]
+dist = false
+
 [features]
 default = []
 # Opt-in real embeddings for `--real-embeddings`. OFF by default: it compiles the
