@@ -36,30 +36,30 @@ strip = true
 inherits = "release"
 lto = "thin"
 
-# Config for `dist` (formerly cargo-dist) — the release/distribution pipeline.
-# Tier 1 = portable + assets with a dynamically-linked ONNX Runtime (see Risk F in
-# docs/ARCHITECTURE.md); fully-static musl is a deferred tier-2 follow-up. The matrix
-# below builds natively on GitHub-hosted runners (incl. the GA arm64 Linux + macOS
-# runners) so `ort` finds a prebuilt ONNX Runtime for every target.
+# Config for 'dist'
 [workspace.metadata.dist]
-# Pinned so CI uses exactly the dist that generated `release.yml` (regenerate on bump).
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
 cargo-dist-version = "0.32.0"
-ci = ["github"]
-# curl|sh + PowerShell are the always-works baseline; Homebrew + npm are wrappers.
-installers = ["shell", "powershell", "homebrew", "npm"]
+# CI backends to support
+ci = "github"
+# Build the embedded dashboard through cargo-dist's supported workflow hook.
+github-build-setup = "../build-setup.yml"
+# The installers to generate for each app
+installers = ["shell", "powershell", "npm", "homebrew"]
+# A GitHub repo to push Homebrew formulas to
 tap = "saatvik333/homebrew-tap"
+# A namespace to use when publishing this package to the npm registry
 npm-scope = "@memeora"
+# Publish jobs to run in CI
 publish-jobs = ["homebrew", "npm"]
-targets = [
-  "x86_64-unknown-linux-gnu",
-  "aarch64-unknown-linux-gnu",
-  "x86_64-apple-darwin",
-  "aarch64-apple-darwin",
-  "x86_64-pc-windows-msvc",
-]
-# Per-artifact checksums published alongside the GitHub Release.
+# Target platforms to build apps for (Rust target-triple syntax)
+targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+# Checksums to generate for each App
 checksum = "sha256"
+# Path that installers should place binaries in
 install-path = "CARGO_HOME"
+# Whether to install an updater program
+install-updater = false
 # Native arm64 Linux runner so `ort` gets a prebuilt aarch64 ONNX Runtime
 # (cross-compiling from x86_64 would leave the binary without its native lib).
 [workspace.metadata.dist.github-custom-runners]
