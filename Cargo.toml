@@ -64,7 +64,6 @@ checksum = "sha256"
 install-path = "CARGO_HOME"
 # Whether to install an updater program
 install-updater = false
-# Native arm64 Linux runner so `ort` gets a prebuilt aarch64 ONNX Runtime
-# (cross-compiling from x86_64 would leave the binary without its native lib).
+# ONNX Runtime's prebuilt Linux archive requires the newer glibc on Ubuntu 24.04.
 [workspace.metadata.dist.github-custom-runners]
-aarch64-unknown-linux-gnu = "ubuntu-22.04-arm"
+x86_64-unknown-linux-gnu = "ubuntu-24.04"
