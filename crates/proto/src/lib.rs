@@ -77,10 +77,20 @@ pub fn build_name(socket: &str) -> std::io::Result<Name<'_>> {
     }
 }
 
-/// Default local-socket name the daemon listens on and clients connect to.
-/// A bare name (no path separator) is treated as a namespaced socket
-/// (Linux abstract namespace / Windows named pipe).
+/// Legacy socket basename. Use [`resolve_socket`] for the per-user default.
 pub const DEFAULT_SOCKET: &str = "memeora-daemon.sock";
+
+fn default_socket() -> String {
+    #[cfg(unix)]
+    if let Some(home) = std::env::var_os("HOME") {
+        return std::path::PathBuf::from(home)
+            .join(".memeora")
+            .join(DEFAULT_SOCKET)
+            .to_string_lossy()
+            .into_owned();
+    }
+    DEFAULT_SOCKET.to_string()
+}
 
 /// Resolve the daemon socket name every peer must agree on: an `explicit` override
 /// (a CLI `--socket` / hook arg) wins, else `$MEMEORA_SOCKET`, else [`DEFAULT_SOCKET`].
@@ -95,7 +105,7 @@ pub fn resolve_socket(explicit: Option<String>) -> String {
                 .ok()
                 .filter(|s| !s.is_empty())
         })
-        .unwrap_or_else(|| DEFAULT_SOCKET.to_string())
+        .unwrap_or_else(default_socket)
 }
 
 /// A scope/container identifier (e.g. a `memeora_user_*` / `repo_*` tag).
@@ -444,10 +454,12 @@ mod tests {
     fn resolve_socket_prefers_explicit_over_env_and_default() {
         // An explicit override always wins, regardless of env (deterministic path).
         assert_eq!(resolve_socket(Some("/tmp/x.sock".into())), "/tmp/x.sock");
-        // With no override, it falls through to $MEMEORA_SOCKET, else DEFAULT_SOCKET.
+        // With no override, it falls through to $MEMEORA_SOCKET, else the per-user default.
         // (Env case is exercised end-to-end; env mutation in-test is unsafe under 2024.)
         if std::env::var("MEMEORA_SOCKET").is_err() {
-            assert_eq!(resolve_socket(None), DEFAULT_SOCKET);
+            assert_eq!(resolve_socket(None), default_socket());
+            #[cfg(unix)]
+            assert!(resolve_socket(None).ends_with("/.memeora/memeora-daemon.sock"));
         }
     }
 

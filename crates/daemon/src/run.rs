@@ -20,7 +20,7 @@ use memeora_core::{
 use memeora_proto::PROTOCOL_VERSION;
 use tokio::sync::broadcast;
 
-use crate::{Engine, dashboard, serve};
+use crate::{Engine, bind, dashboard, serve};
 
 /// Default address the local dashboard binds (loopback only — no network exposure).
 const DEFAULT_DASHBOARD_ADDR: &str = "127.0.0.1:7878";
@@ -32,6 +32,15 @@ fn data_dir() -> Result<PathBuf, Box<dyn Error>> {
     }
     let home = dirs::home_dir().ok_or("could not determine home directory")?;
     Ok(home.join(".memeora"))
+}
+
+fn restrict_data_dir(path: &Path) -> Result<(), Box<dyn Error>> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
 }
 
 /// The dashboard's bind address: `$MEMEORA_DASHBOARD_ADDR` (default
@@ -98,7 +107,12 @@ fn rerank_enabled() -> bool {
 pub fn run() -> Result<(), Box<dyn Error>> {
     let data_dir = data_dir()?;
     std::fs::create_dir_all(&data_dir)?;
+    restrict_data_dir(&data_dir)?;
     let db_path = data_dir.join("memory.db");
+    let socket = memeora_proto::resolve_socket(None);
+    // Acquire the singleton before model/database initialization: a competing daemon
+    // cannot migrate or otherwise touch the live store before being rejected.
+    let listener = bind(&socket)?;
     // Honors MEMEORA_MODELS_DIR (offline bundle) → MEMEORA_HOME/models → ~/.memeora/models.
     let model_cache = memeora_core::models::resolve_dir();
 
@@ -207,8 +221,6 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         _ => engine,
     };
 
-    let socket = memeora_proto::resolve_socket(None);
-
     // Start the local dashboard (optional) on its own thread + runtime, using a
     // second read-only connection so it never contends with the IPC writer. A
     // failure here is non-fatal: the daemon's core job is the IPC server.
@@ -249,6 +261,6 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         db_path.display()
     );
     // The IPC server is the daemon's lifetime; it owns the sole writer and blocks.
-    serve(engine, &socket)?;
+    serve(engine, listener)?;
     Ok(())
 }

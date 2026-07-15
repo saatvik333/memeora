@@ -198,6 +198,9 @@ pub fn ingest_prepared(
                 // Live row: reinforce it (going through `upsert` would reset
                 // strength/created_at).
                 store.reinforce(&id, params.reinforce_delta)?;
+                if source.is_some() {
+                    store.record_evidence(&id, &evidence_source, &quote, occurred_at)?;
+                }
                 outcome.reinforced.push(id);
             } else {
                 // The content was retired (`is_latest = 0`) — but plain forgetting and
@@ -772,6 +775,20 @@ mod tests {
             1,
             "exact re-ingest must not inflate proof_count"
         );
+    }
+
+    #[test]
+    fn exact_reingest_records_distinct_explicit_sources() {
+        let embedder = MapEmbedder::new(&[("I use Postgres", vec![1.0, 0.0, 0.0])]);
+        let mut store = SqliteStore::open_in_memory(3).unwrap();
+        let p = IngestParams::default();
+        let prepared = || embed_candidates(&embedder, vec![fact("I use Postgres")]).unwrap();
+
+        let first = ingest_prepared(&mut store, "t", Some("agent-1"), prepared(), &p).unwrap();
+        ingest_prepared(&mut store, "t", Some("agent-2"), prepared(), &p).unwrap();
+        assert_eq!(store.get(&first.added[0]).unwrap().unwrap().proof_count, 2);
+        ingest_prepared(&mut store, "t", Some("agent-2"), prepared(), &p).unwrap();
+        assert_eq!(store.get(&first.added[0]).unwrap().unwrap().proof_count, 2);
     }
 
     #[test]

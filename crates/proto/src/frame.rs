@@ -32,11 +32,15 @@ pub fn write_message<W: Write, T: Serialize>(writer: &mut W, message: &T) -> io:
 /// connection), and an error on a truncated frame or oversize length.
 pub fn read_message<R: Read, T: DeserializeOwned>(reader: &mut R) -> io::Result<Option<T>> {
     let mut len_buf = [0u8; 4];
-    match reader.read_exact(&mut len_buf) {
-        Ok(()) => {}
-        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+    // A clean EOF is valid only before a frame starts. Once even one header byte
+    // arrives, EOF means the peer sent a malformed/truncated frame.
+    match reader.read(&mut len_buf[..1]) {
+        Ok(0) => return Ok(None),
+        Ok(1) => {}
+        Ok(_) => unreachable!("single-byte buffer cannot read more than one byte"),
         Err(e) => return Err(e),
     }
+    reader.read_exact(&mut len_buf[1..])?;
 
     let len = u32::from_be_bytes(len_buf);
     if len > MAX_MESSAGE_BYTES {

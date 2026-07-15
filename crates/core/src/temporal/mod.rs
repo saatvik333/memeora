@@ -198,7 +198,14 @@ fn iso_at(s: &str) -> Option<i64> {
     let year: i64 = s[0..4].parse().ok()?;
     let month: i64 = s[5..7].parse().ok()?;
     let day: i64 = s[8..10].parse().ok()?;
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+    let days_in_month = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if year % 400 == 0 || (year % 4 == 0 && year % 100 != 0) => 29,
+        2 => 28,
+        _ => return None,
+    };
+    if !(1..=days_in_month).contains(&day) {
         return None;
     }
     Some(days_from_civil(year, month, day) * DAY)
@@ -239,6 +246,19 @@ mod tests {
         assert_eq!(start % DAY, 0, "start is a UTC day boundary");
         // Slash form parses identically.
         assert_eq!(parse("on 2026/06/12", NOW).unwrap().0, start);
+    }
+
+    #[test]
+    fn invalid_calendar_dates_are_rejected() {
+        for date in ["2026-02-29", "2026-04-31", "1900-02-29"] {
+            assert!(parse(date, NOW).is_none(), "accepted invalid date {date}");
+            assert!(
+                parse_future(date, NOW).is_none(),
+                "accepted invalid date {date}"
+            );
+        }
+        assert!(parse("2024-02-29", NOW).is_some());
+        assert!(parse("2000-02-29", NOW).is_some());
     }
 
     #[test]

@@ -10,9 +10,7 @@ use std::time::Duration;
 
 use interprocess::ConnectWaitMode;
 use interprocess::local_socket::{ConnectOptions, Stream, prelude::*};
-use memeora_proto::{
-    DEFAULT_SOCKET, MemoryDto, PROTOCOL_VERSION, Request, Response, build_name, frame,
-};
+use memeora_proto::{MemoryDto, PROTOCOL_VERSION, Request, Response, build_name, frame};
 
 /// How long [`Client::connect`] waits for the daemon to accept the connection.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -32,9 +30,9 @@ pub struct Client {
 }
 
 impl Client {
-    /// Connect to the default daemon socket ([`DEFAULT_SOCKET`]).
+    /// Connect to the default per-user daemon socket.
     pub fn connect_default() -> io::Result<Self> {
-        Self::connect(DEFAULT_SOCKET)
+        Self::connect(&memeora_proto::resolve_socket(None))
     }
 
     /// Connect to a daemon on a specific socket name/path.
@@ -127,6 +125,15 @@ impl Client {
         self.capabilities.iter().any(|c| c == capability)
     }
 
+    fn require_capability(&self, capability: &str) -> io::Result<()> {
+        self.supports(capability).then_some(()).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("daemon does not support capability {capability}"),
+            )
+        })
+    }
+
     /// Ingest raw text; returns `(added, reinforced)` counts.
     pub fn ingest(&mut self, scope: &str, text: &str) -> io::Result<(usize, usize)> {
         self.ingest_from(scope, text, None)
@@ -199,6 +206,7 @@ impl Client {
         k: usize,
         max_tokens: Option<usize>,
     ) -> io::Result<(Vec<MemoryDto>, Vec<MemoryDto>, Vec<MemoryDto>)> {
+        self.require_capability(memeora_proto::capability::BUNDLE)?;
         match self.call(&Request::Bundle {
             scope: scope.to_string(),
             query: query.to_string(),
@@ -247,6 +255,7 @@ impl Client {
     /// observations. Returns `(observations, sources_linked)`. Idempotent — re-running
     /// converges. Gate on the `consolidate` capability.
     pub fn consolidate(&mut self, scope: &str) -> io::Result<(usize, usize)> {
+        self.require_capability(memeora_proto::capability::CONSOLIDATE)?;
         match self.call(&Request::Consolidate {
             scope: scope.to_string(),
         })? {
@@ -284,7 +293,7 @@ fn unexpected(response: Response) -> io::Error {
 mod tests {
     use super::*;
     use memeora_core::{EmbeddingProvider, EmbeddingSpace, HeuristicExtractor, SqliteStore};
-    use memeora_daemon::{Engine, serve};
+    use memeora_daemon::{Engine, bind, serve};
     use std::thread;
     use std::time::Duration;
 
@@ -307,7 +316,7 @@ mod tests {
             Box::new(LenEmbedder(EmbeddingSpace::new("mock", "len", 3))),
             Box::new(HeuristicExtractor::default()),
         );
-        thread::spawn(move || serve(engine, socket).unwrap());
+        thread::spawn(move || serve(engine, bind(socket).unwrap()).unwrap());
     }
 
     fn connect_retry(socket: &str) -> Client {

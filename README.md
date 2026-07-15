@@ -7,14 +7,14 @@ memeora gives your AI coding tools **persistent memory** — it learns facts fro
 builds a knowledge graph, and recalls the right context at the right time. It's a free,
 **local-first**, open alternative to hosted memory APIs: **no required LLM, no API key, works offline.**
 
-> **Status:** Steps 1–10 implemented (v0.1.0), plus the **step-11 engine-evolution core** and
-> the **VISION-gap engine program (Phases 1–3)** — session-aware capture, entity
-> canonicalization, consolidation (`proof_count`), the Ebbinghaus/Hebbian/Cepeda forgetting
-> engine, the opt-in local-LLM extractor (off by default), bi-temporal valid-time +
-> version-chain supersession, 4-channel recall (dense + BM25 + graph + temporal) with
-> token-budget fill, and the distinct-source evidence/freshness model. The engine, its
+> **Status:** Steps 1–10 implemented (v0.1.1), plus the **engine-evolution** and
+> **VISION-gap programs** — session-aware capture, entity canonicalization, evidence-backed
+> consolidation, memory and edge dynamics, opt-in local-LLM extraction and belief synthesis,
+> bi-temporal valid-time + version-chain supersession, 4-channel recall with token-budget fill,
+> retrieval hardening, and the offline LongMemEval/LoCoMo benchmark harness. The engine, its
 > surfaces, per-tool packaging, the local dashboard, the extensibility/ecosystem layer, and
 > the cross-platform **release pipeline** are end-to-end:
+>
 > - **Engine (`crates/core`):** SQLite + statically-linked `sqlite-vec` KNN + FTS5 behind the
 >   `VectorStore` trait (container-tag scoping, soft-forget); `EmbeddingProvider` with a
 >   content-hash cache and a local `fastembed` backend; **4-channel hybrid retrieval** (dense +
@@ -27,8 +27,8 @@ builds a knowledge graph, and recalls the right context at the right time. It's 
 >   and serves it.
 > - **Surfaces:** `memeora-client` (typed Rust SDK), `memeora-mcp` (rmcp MCP server — recall/
 >   remember/context/list/forget over stdio, **scope defaults to the current project**), the `memeora`
->   **CLI**, and `memeora-hook` (multi-host command-hook: session-start/`PreInvocation` injection
->   + `Stop`/`PreCompact` capture for Claude, Codex & Antigravity).
+>   **CLI**, and `memeora-hook` (multi-host command-hook: session-start/`PreInvocation` injection;
+>   `Stop`/`PreCompact` capture for Claude, Codex & Antigravity).
 > - **Adapters ([`adapters/`](adapters/)):** ready-to-install plugin bundles for **Claude Code**
 >   (plugin marketplace), **Codex** (`config.toml` + hooks), **Antigravity** (plugin bundle, own
 >   camelCase schema), and **OpenCode** (thin TS shim — the only non-Rust adapter). All four
@@ -52,10 +52,11 @@ builds a knowledge graph, and recalls the right context at the right time. It's 
 >   stay out of the binary (Risk F): they download on first run or ship as an offline bundle,
 >   integrity-checked via a `SHA256SUMS` manifest (`memeora models verify` / `bundle`).
 >
-> Next (optional/scale): Tier-1 NER, LanceDB, a benchmark harness. See
-> [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+> Next (optional/scale): Tier-1 NER, LanceDB, date-augmented embeddings, synthetic recall
+> decoys, and recall-driven edge potentiation. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## Highlights
+
 - **Rust** engine + daemon + MCP server + hook binary + CLI → one self-contained distributable.
 - **Universal:** one MCP server + one multi-host hook binary serve all four tools; any
   MCP-capable harness works with zero extra code.
@@ -65,15 +66,16 @@ builds a knowledge graph, and recalls the right context at the right time. It's 
   harnesses without forking.
 
 ## Workspace
+
 | Crate | Role |
-|-------|------|
+| ------- | ------ |
 | `crates/core` | engine: storage, embeddings, extraction, graph, hybrid search, profiles |
 | `crates/proto` | versioned IPC contract (public) |
 | `crates/client` | Rust client SDK |
 | `crates/daemon` | blocking writer-actor daemon: holds models + DB, sole writer; embeds off the writer thread; serves the dashboard (axum + SSE) |
 | `crates/mcp` | `rmcp` MCP server (recall / remember / context / list / forget) |
 | `crates/hook` | `memeora-hook` descriptor-driven command-hook library (its binary ships from `crates/cli`) |
-| `crates/cli` | `memeora` CLI (doctor / add / ingest / recall / context / list / forget / scope / dashboard / models) — also the package that ships all four binaries |
+| `crates/cli` | `memeora` CLI (serve / doctor / add / ingest / recall / context / list / forget / consolidate / scope / dashboard / models) — also the package that ships all four binaries |
 | `crates/bench` | `memeora-bench` — offline LongMemEval/LoCoMo retrieval harness (recall@k / NDCG@10, seed-42 dev split) |
 | `dashboard/` | Svelte 5 + Vite + Sigma.js graph UI, embedded into the daemon via `rust-embed` |
 | `sdk/ts/` | `@memeora/client` — TypeScript client over the IPC protocol |
@@ -112,6 +114,7 @@ brew install saatvik333/tap/memeora
 # any platform — published npm wrapper (use bun; npm/pnpm also work)
 bun add -g @memeora/memeora
 ```
+
 ```powershell
 # Windows — PowerShell installer
 powershell -ExecutionPolicy ByPass -c "irm https://github.com/saatvik333/memeora/releases/latest/download/memeora-installer.ps1 | iex"
@@ -125,11 +128,13 @@ drop the model files there (or point `MEMEORA_MODELS_DIR` at a bundle) and verif
 integrity with `memeora models verify`.
 
 ## Build (from source)
+
 ```sh
 cargo build --workspace
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 ```
+
 Toolchain is pinned in `rust-toolchain.toml` (Rust 1.95, edition 2024).
 
 > **Note:** `cargo test --workspace` compiles the `fastembed`/ONNX stack (feature
@@ -138,9 +143,11 @@ Toolchain is pinned in `rust-toolchain.toml` (Rust 1.95, edition 2024).
 > (`scripts/check.sh`) mirrors CI and runs everything `--all-features`.
 
 ## Contributing
+
 See [`CONTRIBUTING.md`](CONTRIBUTING.md). Adding support for a new harness is designed to be easy —
 often just a host-descriptor file: see [`docs/ADAPTERS.md`](docs/ADAPTERS.md). Start by copying a
 first-party descriptor from [`adapters/_descriptors/`](adapters/_descriptors/).
 
 ## License
+
 Dual-licensed under [MIT](LICENSE-MIT) OR [Apache-2.0](LICENSE-APACHE).

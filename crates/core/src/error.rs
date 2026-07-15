@@ -16,6 +16,8 @@ pub enum Error {
         /// Dimensionality of the supplied vector.
         got: usize,
     },
+    /// Invalid caller-provided input rejected before it reaches storage.
+    Invalid(String),
     /// An embedding provider failed (model load, inference, or a poisoned lock).
     /// Carries a message because the underlying error type varies by backend.
     Embedding(String),
@@ -32,6 +34,7 @@ impl fmt::Display for Error {
             Error::DimMismatch { expected, got } => {
                 write!(f, "embedding dim mismatch: expected {expected}, got {got}")
             }
+            Error::Invalid(msg) => write!(f, "invalid input: {msg}"),
             Error::Embedding(msg) => write!(f, "embedding error: {msg}"),
             Error::Llm(msg) => write!(f, "llm extractor error: {msg}"),
         }
@@ -43,7 +46,9 @@ impl std::error::Error for Error {
         match self {
             Error::Sqlite(e) => Some(e),
             Error::Migration(e) => Some(e),
-            Error::DimMismatch { .. } | Error::Embedding(_) | Error::Llm(_) => None,
+            Error::DimMismatch { .. } | Error::Invalid(_) | Error::Embedding(_) | Error::Llm(_) => {
+                None
+            }
         }
     }
 }

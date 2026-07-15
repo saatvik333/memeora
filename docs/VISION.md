@@ -19,7 +19,7 @@ automation runner is just a thin surface over the same brain.
 These filter everything we borrow. An idea that violates one is declined or demoted to an
 opt-in tier.
 
-- **Rust, single static binary, sole-writer daemon.** No Node/Python runtime in the core.
+- **Rust, portable native distribution, sole-writer daemon.** No Node/Python runtime in the core; fully-static ONNX Runtime distribution remains future work.
 - **Local-first. No *required* LLM, no *required* API key. Fully offline by default.**
 - **Every quality tier above the heuristic floor is the user's explicit choice.** Detection
   ≠ activation. A localhost model is part of the user's machine; an external API is a
@@ -45,13 +45,14 @@ opt-in tier.
 ## The four pillars (each a concrete mechanism, not a slogan)
 
 > **Status (2026-07):** much of this has shipped in the engine — entity canonicalization,
-> the distinct-source evidence model + freshness trends, the Ebbinghaus/Hebbian/Cepeda
-> forgetting engine (memories; edge decay pending), bi-temporal valid-time, version-chain
-> supersession, and the opt-in local-LLM extractor with candidate self-repair. Still open:
-> multi-format ingestion, intent-specific context, LLM belief-phrasing/NLI, and the
-> benchmark harness. Details in `docs/ARCHITECTURE.md` (step-11 + VISION-gap status notes).
+> distinct-source evidence + freshness trends, memory and edge Ebbinghaus/Hebbian/Cepeda
+> dynamics, bi-temporal valid-time, version-chain supersession, the opt-in local-LLM extractor
+> with candidate self-repair, LLM belief synthesis with deterministic fallback, and the offline
+> benchmark harness. Still open: multi-format ingestion, intent-specific context, and
+> NLI-driven contradiction detection. Details in `docs/ARCHITECTURE.md`.
 
 ### 🧠 Learns — turns raw turns into durable, consolidated understanding
+
 - **Observation network** *(Hindsight)* — a consolidated-belief layer over raw memories.
   The bookkeeping is **heuristic and LLM-free**: `proof_count = |distinct source ids|`,
   evidence carries exact source quotes + timestamps, merge is **set-union over source ids**
@@ -63,6 +64,7 @@ opt-in tier.
   are also common words). Pure heuristic; the only network call (Wikipedia) is off by default.
 
 ### 🔧 Adapts — meets the user's hardware, privacy posture, and tools where they are
+
 - **The user-chosen extractor ladder** (the heart of "adapts"):
   - **Tier 0 — heuristic** (default, offline, zero-dep, instant). The floor that keeps
     "no required LLM" literally true.
@@ -79,18 +81,19 @@ opt-in tier.
   intent (session-start vs recall vs explain vs diff), not one fixed profile dump.
 
 ### 🩹 Heals — keeps its own graph clean, especially under LLM input
-- **Graph self-repair** *(Understand-Anything `schema.ts`)* — the safety layer that makes the
-  opt-in local-LLM tier trustworthy. Every emitted node/edge runs
-  `lowercase → alias-map → default → coerce → clamp → drop-invalid-node → **drop-dangling-edge**
-  → fatal-only-if-zero-nodes`, and **every mutation is logged** as a `GraphIssue`
-  (`auto-corrected | dropped | fatal`) audit trail. Invariant: *validate nodes first, then drop
-  any edge whose endpoints aren't in the surviving node set* — applied at write and again after
-  any merge.
-- **Dedup / repair / contradiction** *(MemPalace + Hindsight + memeora's existing hardening)* —
-  near-duplicates reinforce; contradictions flip `is_latest` (never delete); poisoned-sequence
-  detection guards ingestion.
+
+- **Candidate repair** *(inspired by Understand-Anything `schema.ts`)* — the
+  shipped opt-in local-LLM boundary trims content, drops empty candidates, and
+  coerces an invalid kind to `Fact`. Malformed JSON elements are skipped
+  independently; an unusable response falls back to heuristic extraction.
+  Node/edge validation, dangling-edge repair, and a `GraphIssue` audit trail
+  remain future work.
+- **Dedup / repair / contradiction** *(MemPalace + Hindsight + memeora's
+  existing hardening)* — near-duplicates reinforce; contradictions flip
+  `is_latest` (never delete); poisoned-sequence detection guards ingestion.
 
 ### 🌱 Evolves — gets sharper with time instead of bloating
+
 - **Forgetting & reinforcement engine** *(MemPalace `dynamics.py` — the keystone)*. This
   un-defers the "automatic forgetting" memeora explicitly postponed (Risk B), with a
   neuroscience-grounded, **pure-heuristic** model applied to both memories and graph edges:
@@ -120,11 +123,12 @@ temporal, RRF-fused, with token-budget fill. The distilled pipeline — Hindsigh
 with its real constants as tunable starting points:
 
 1. **Four channels in parallel:** dense (sqlite-vec) · BM25 (FTS5) · **graph** · **temporal**.
-   - *Graph activation* (fed into fusion as a ranked list):
-     `score = tanh(shared_entities × 0.5) + semantic_link[0.7,1.0] + causal_link(+1.0)`, summed
-     so independent evidence channels each contribute.
-   - *Temporal*: rule-based date parsing ("last spring" → `[τ_start, τ_end]`; **no** model
-     fallback — degrade gracefully) → proximity around the window midpoint.
+   - *Graph activation* (fed into fusion as a ranked list): a saturating shared-entity score
+     `min(shared_entities, 5) / 5` plus the strongest direct edge's kind-weighted, idle-decayed
+     strength. Direct links outrank entity-only neighbours.
+   - *Temporal*: rule-based parsing of ISO dates, `&lt;n&gt; units ago`, and coarse relative anchors
+     such as `yesterday`, `last week`, and `last month` (**no** model fallback — degrade
+     gracefully) → interval overlap and proximity ranking.
 2. **Reciprocal Rank Fusion** — `k = 60`, rank-based, **equal-weight** (importance from rank,
    not per-channel multipliers); per-channel cap before fusing.
 3. **Rerank** — cross-encoder *(fastembed)* **or passthrough** when no model: `CE = 1 − 0.9·rank/(n−1)`,
@@ -145,7 +149,7 @@ descriptors** + client SDKs (`memeora-client`, `@memeora/client`) + the conforma
 breadth is adapters, **not** a re-architecture.
 
 | Tier | Surfaces | Mechanism | Status |
-|------|----------|-----------|--------|
+| ------ | ---------- | ----------- | -------- |
 | **A — any MCP host** | Cursor, Windsurf, Zed, Cline, Copilot, Gemini CLI, … | the universal `rmcp` server — **zero new code**, one config entry | free **today** |
 | **B — coding agents** | Claude Code, Codex, Antigravity, OpenCode | command-hook + descriptor | **have** |
 | **C — agent frameworks** | LangChain, LangGraph, CrewAI, Mastra, Agno, AI-SDK, OpenAI-Agents, VoltAgent | thin SDK middleware over IPC/MCP | new adapters |
@@ -161,7 +165,7 @@ the core**, because the trait + descriptor + SDK seams already exist.
 ## What we deliberately decline (and why)
 
 | Declined | Source | Why |
-|----------|--------|-----|
+| ---------- | -------- | ----- |
 | `reflect`/Cara reasoning, **opinion network**, disposition knobs (skepticism/literalism/empathy) | Hindsight | an LLM-per-query *reasoning* layer, not a *memory* layer; at most opt-in Tier-3 |
 | **AAAK** emotion/flag taxonomy | MemPalace | lossy heuristic their own docs disown for the headline benchmark; embeddings approximate the index better. (We keep the *idea* — a cheap pointer layer over verbatim — not the codes.) |
 | Postgres/pgvector · ChromaDB · Qdrant default | Hindsight / MemPalace | conflicts with single-binary, sqlite-vec, local-first (kept behind the `VectorStore` trait for scale, benchmark-driven) |

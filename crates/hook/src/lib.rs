@@ -181,7 +181,10 @@ pub fn transcript_to_text(jsonl: &str, max_turns: usize) -> String {
             .and_then(Value::as_str)
             .or_else(|| value.get("role").and_then(Value::as_str));
         let Some(role) = role else { continue };
-        if role != "user" && role != "assistant" {
+        // Only user-authored prose becomes durable memory. Assistant text can be
+        // induced by repository/tool content and would otherwise create a
+        // write→inject prompt-poisoning loop across future sessions.
+        if role != "user" {
             continue;
         }
         let text = strip_injected_memory(&extract_text(&value));
@@ -531,10 +534,7 @@ mod tests {
             r#"not json"#,
         ]
         .join("\n");
-        assert_eq!(
-            transcript_to_text(&jsonl, 40),
-            "user: I prefer rust\nassistant: noted"
-        );
+        assert_eq!(transcript_to_text(&jsonl, 40), "user: I prefer rust");
     }
 
     #[test]
@@ -674,7 +674,7 @@ mod tests {
         let jsonl = [pure, mixed, reply.to_string()].join("\n");
         assert_eq!(
             transcript_to_text(&jsonl, 40),
-            "user: please fix the login bug\nassistant: on it"
+            "user: please fix the login bug"
         );
     }
 

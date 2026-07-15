@@ -12,4 +12,4 @@ pub mod server;
 
 pub use engine::{ChangeEvent, Engine};
 pub use run::run;
-pub use server::serve;
+pub use server::{bind, serve};

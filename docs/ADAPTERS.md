@@ -87,9 +87,10 @@ language-native shim that calls the daemon. Use a client SDK:
 - **Rust:** [`memeora-client`](../crates/client) — typed methods over the IPC.
 - **TypeScript:** [`@memeora/client`](../sdk/ts) — same protocol from Node.
 
-Both perform the version + capability handshake and expose one method per verb
-(`ingest`/`add`/`recall`/`context`/`list`/`forget`). For cross-language use, run
-the daemon on a filesystem socket (`MEMEORA_SOCKET=/path/to.sock`).
+Both perform the version + capability handshake and expose the supported operations
+(`ingest`/`add`/`recall`/`context`/`bundle`/`list`/`forget`/`consolidate`). For
+cross-language use, run the daemon on a filesystem socket
+(`MEMEORA_SOCKET=/path/to.sock`).
 
 ## Stability
 

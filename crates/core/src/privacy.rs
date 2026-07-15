@@ -68,18 +68,24 @@ pub fn redact(text: &str) -> String {
     // Whether the previous word was an auth scheme ("Bearer"/"Basic"), so the token
     // that follows it is redacted even without a recognizable prefix.
     let mut after_auth_scheme = false;
+    let mut after_sensitive_key = false;
     for ch in text.chars() {
         if ch.is_whitespace() {
             if !word.is_empty() {
-                out.push_str(&redact_word(&word, after_auth_scheme));
+                let redacted = if after_sensitive_key {
+                    redact_value(&word)
+                } else {
+                    redact_word(&word, after_auth_scheme)
+                };
+                out.push_str(&redacted);
                 after_auth_scheme = is_auth_scheme(&word);
+                after_sensitive_key = is_separated_sensitive_key(&word);
                 word.clear();
             }
             if ch == '\n' {
-                // An auth-scheme cue never carries across lines: headers put the
-                // credential on the same line, so a line ending in "Basic"/"Bearer"
-                // must not mask the first long word of the next line.
+                // Header/flag cues never carry across lines.
                 after_auth_scheme = false;
+                after_sensitive_key = false;
             }
             out.push(ch); // preserve the exact whitespace char verbatim
         } else {
@@ -87,7 +93,12 @@ pub fn redact(text: &str) -> String {
         }
     }
     if !word.is_empty() {
-        out.push_str(&redact_word(&word, after_auth_scheme));
+        let redacted = if after_sensitive_key {
+            redact_value(&word)
+        } else {
+            redact_word(&word, after_auth_scheme)
+        };
+        out.push_str(&redacted);
     }
     out
 }
@@ -141,6 +152,11 @@ const SECRET_PREFIXES: &[&str] = &[
 /// Handles tokens wrapped in punctuation (quotes, brackets, trailing commas) by
 /// inspecting the alphanumeric core, so `"sk-…",` and a tab-indented `\tsk-…` are
 /// caught — not just a bare space-delimited token.
+fn redact_value(word: &str) -> String {
+    let core = word.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+    word.replace(core, "[REDACTED]")
+}
+
 fn redact_word(word: &str, after_auth_scheme: bool) -> String {
     // A token right after an auth scheme ("Authorization: Bearer <tok>", "Basic
     // <tok>") is a credential even without a recognizable prefix. Gate on token
@@ -203,6 +219,16 @@ fn is_auth_scheme(word: &str) -> bool {
         .trim_matches(|c: char| !c.is_ascii_alphanumeric())
         .to_ascii_lowercase();
     core == "bearer" || core == "basic"
+}
+
+/// Whether a word is a sensitive `key:` or CLI `--key` whose value is the next word.
+fn is_separated_sensitive_key(word: &str) -> bool {
+    let separated = word.ends_with(':') || (word.starts_with('-') && !word.contains('='));
+    let key = word
+        .trim_matches(|c: char| !c.is_ascii_alphanumeric())
+        .to_ascii_lowercase()
+        .replace('-', "_");
+    separated && is_sensitive_key(&key)
 }
 
 /// Whether a bare token (no known prefix) is long/mixed enough to be a credential
@@ -368,6 +394,20 @@ mod tests {
         assert!(oauth.contains("[REDACTED]"), "{oauth:?}");
         let authz = redact("authorization=abc123");
         assert!(authz.contains("[REDACTED]"), "{authz:?}");
+    }
+
+    #[test]
+    fn redacts_values_separated_from_sensitive_keys() {
+        for (input, secret) in [
+            ("password: hunter2", "hunter2"),
+            ("--api-key sk_short", "sk_short"),
+            ("--token abc123", "abc123"),
+        ] {
+            let out = redact(input);
+            assert!(out.contains("[REDACTED]"), "{out:?}");
+            assert!(!out.contains(secret), "{out:?}");
+        }
+        assert_eq!(redact("--author Jane"), "--author Jane");
     }
 
     #[test]

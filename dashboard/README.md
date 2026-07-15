@@ -1,8 +1,8 @@
 # memeora dashboard
 
-A local, function-first graph UI for the memeora memory engine — **Svelte 5 +
-Vite + Sigma.js** (WebGL). Styling is deliberately minimal; the graph is the
-centerpiece.
+A local graph UI for the memeora memory engine — **Svelte 5 + Vite + Sigma.js**
+(WebGL). The graph is the centerpiece, with a small design-token system, persisted
+light/dark theme, and `bits-ui` accessibility primitives.
 
 The built SPA is **embedded into the daemon binary** (via `rust-embed`) and
 served by the daemon's HTTP server — no separate process, works offline. Open it
@@ -24,7 +24,7 @@ dashboard address — start `memeora-daemon` first). Override the proxy target i
 ```sh
 bun install
 bun run build     # → dist/, which the daemon embeds via rust-embed
-cargo build --release -p memeora-daemon
+cargo build --release -p memeora
 ```
 
 If `dist/` is absent at compile time the daemon's `build.rs` writes a placeholder

@@ -35,6 +35,13 @@ fn main() {
         let _ = fs::create_dir_all(&dist);
         let _ = fs::write(&index, PLACEHOLDER);
     }
+    if std::env::var_os("MEMEORA_REQUIRE_DASHBOARD").is_some()
+        && fs::read_to_string(&index)
+            .is_ok_and(|html| html.contains("hasn't been built into this binary"))
+    {
+        panic!("release build requires `bun --cwd dashboard run build`");
+    }
+    println!("cargo:rerun-if-env-changed=MEMEORA_REQUIRE_DASHBOARD");
     // Re-run if the built assets change, so a fresh `bun run build` is picked up.
     println!("cargo:rerun-if-changed={}", dist.display());
 }

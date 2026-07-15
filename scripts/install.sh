@@ -28,32 +28,45 @@ KNOWN_ADAPTERS="claude codex antigravity opencode mcp"
 # ----------------------------------------------------------------------------- #
 ASSUME_YES="${MEMEORA_YES:-0}"
 DRY_RUN="${MEMEORA_DRY_RUN:-0}"
-METHOD="${MEMEORA_METHOD:-auto}"        # auto | cargo-dist | brew | npm | source
-INSTALL_DIR="${MEMEORA_DIR:-}"          # empty = installer's default
-OFFLINE="${MEMEORA_OFFLINE:-0}"         # 1 = don't download the model
+METHOD="${MEMEORA_METHOD:-auto}"            # auto | cargo-dist | brew | source
+INSTALL_DIR="${MEMEORA_DIR:-}"              # empty = installer's default
+OFFLINE="${MEMEORA_OFFLINE:-0}"             # 1 = don't download the model
 START_DAEMON="${MEMEORA_START_DAEMON:-ask}" # ask | 1 | 0
-DASHBOARD="${MEMEORA_DASHBOARD:-on}"    # on | off
-WIRE_HOOKS="${MEMEORA_WIRE_HOOKS:-0}"   # 1 = also merge hook config (Claude/Codex)
-ADAPTERS="${MEMEORA_ADAPTERS:-ask}"     # ask | csv of KNOWN_ADAPTERS | none
+DASHBOARD="${MEMEORA_DASHBOARD:-on}"        # on | off
+WIRE_HOOKS="${MEMEORA_WIRE_HOOKS:-0}"       # 1 = also merge hook config (Claude/Codex)
+ADAPTERS="${MEMEORA_ADAPTERS:-ask}"         # ask | csv of KNOWN_ADAPTERS | none
 
 # ----------------------------------------------------------------------------- #
 # Output helpers (colour only on a TTY, honouring NO_COLOR)
 # ----------------------------------------------------------------------------- #
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
-	C_RESET=$(printf '\033[0m'); C_BOLD=$(printf '\033[1m')
-	C_BLUE=$(printf '\033[34m'); C_GREEN=$(printf '\033[32m')
-	C_YELLOW=$(printf '\033[33m'); C_RED=$(printf '\033[31m'); C_DIM=$(printf '\033[2m')
+	C_RESET=$(printf '\033[0m')
+	C_BOLD=$(printf '\033[1m')
+	C_BLUE=$(printf '\033[34m')
+	C_GREEN=$(printf '\033[32m')
+	C_YELLOW=$(printf '\033[33m')
+	C_RED=$(printf '\033[31m')
+	C_DIM=$(printf '\033[2m')
 else
-	C_RESET=; C_BOLD=; C_BLUE=; C_GREEN=; C_YELLOW=; C_RED=; C_DIM=
+	C_RESET=
+	C_BOLD=
+	C_BLUE=
+	C_GREEN=
+	C_YELLOW=
+	C_RED=
+	C_DIM=
 fi
 
-info()  { printf '%s\n' "${C_BLUE}::${C_RESET} $*"; }
-step()  { printf '\n%s\n' "${C_BOLD}${C_BLUE}==>${C_RESET} ${C_BOLD}$*${C_RESET}"; }
-ok()    { printf '%s\n' "${C_GREEN} ✓${C_RESET} $*"; }
-warn()  { printf '%s\n' "${C_YELLOW} !${C_RESET} $*" >&2; }
-err()   { printf '%s\n' "${C_RED}error:${C_RESET} $*" >&2; }
-dim()   { printf '%s\n' "${C_DIM}$*${C_RESET}"; }
-die()   { err "$@"; exit 1; }
+info() { printf '%s\n' "${C_BLUE}::${C_RESET} $*"; }
+step() { printf '\n%s\n' "${C_BOLD}${C_BLUE}==>${C_RESET} ${C_BOLD}$*${C_RESET}"; }
+ok() { printf '%s\n' "${C_GREEN} ✓${C_RESET} $*"; }
+warn() { printf '%s\n' "${C_YELLOW} !${C_RESET} $*" >&2; }
+err() { printf '%s\n' "${C_RED}error:${C_RESET} $*" >&2; }
+dim() { printf '%s\n' "${C_DIM}$*${C_RESET}"; }
+die() {
+	err "$@"
+	exit 1
+}
 
 # Show a command, and run it unless --dry-run.
 run() {
@@ -72,15 +85,16 @@ if [ "$ASSUME_YES" != 1 ] && [ -r /dev/tty ] && [ -t 1 ]; then INTERACTIVE=1; fi
 
 # ask_yes_no <prompt> <default 0|1> -> returns 0 for yes, 1 for no
 ask_yes_no() {
-	_prompt=$1; _default=$2
+	_prompt=$1
+	_default=$2
 	if [ "$INTERACTIVE" != 1 ]; then return "$([ "$_default" = 1 ] && echo 0 || echo 1)"; fi
 	if [ "$_default" = 1 ]; then _hint="[Y/n]"; else _hint="[y/N]"; fi
 	printf '%s %s ' "${C_BOLD}?${C_RESET} $_prompt" "$_hint" >/dev/tty
 	IFS= read -r _ans </dev/tty || _ans=
 	case "$_ans" in
-		[Yy]*) return 0 ;;
-		[Nn]*) return 1 ;;
-		*) return "$([ "$_default" = 1 ] && echo 0 || echo 1)" ;;
+	[Yy]*) return 0 ;;
+	[Nn]*) return 1 ;;
+	*) return "$([ "$_default" = 1 ] && echo 0 || echo 1)" ;;
 	esac
 }
 
@@ -96,7 +110,7 @@ Usage: install.sh [options]   (interactive by default)
 Options:
   --yes                 non-interactive; accept defaults (CI)
   --dry-run             print what would happen; change nothing
-  --method <m>          binary install: auto|cargo-dist|brew|npm|source
+  --method <m>          binary install: auto|cargo-dist|brew|source
   --dir <path>          custom install dir for the binaries
   --offline             do NOT download the embedding model (set one up later)
   --adapters <csv>      tools to wire, of: ${KNOWN_ADAPTERS} (or 'none')
@@ -114,22 +128,37 @@ EOF
 # ----------------------------------------------------------------------------- #
 while [ $# -gt 0 ]; do
 	case "$1" in
-		--yes|-y) ASSUME_YES=1 ;;
-		--dry-run) DRY_RUN=1 ;;
-		--method) METHOD=${2:?--method needs a value}; shift ;;
-		--method=*) METHOD=${1#*=} ;;
-		--dir) INSTALL_DIR=${2:?--dir needs a value}; shift ;;
-		--dir=*) INSTALL_DIR=${1#*=} ;;
-		--offline) OFFLINE=1 ;;
-		--adapters) ADAPTERS=${2:?--adapters needs a value}; shift ;;
-		--adapters=*) ADAPTERS=${1#*=} ;;
-		--wire-hooks) WIRE_HOOKS=1 ;;
-		--daemon) START_DAEMON=1 ;;
-		--no-daemon) START_DAEMON=0 ;;
-		--dashboard) DASHBOARD=${2:?--dashboard needs a value}; shift ;;
-		--dashboard=*) DASHBOARD=${1#*=} ;;
-		-h|--help) usage; exit 0 ;;
-		*) die "unknown option: $1 (try --help)" ;;
+	--yes | -y) ASSUME_YES=1 ;;
+	--dry-run) DRY_RUN=1 ;;
+	--method)
+		METHOD=${2:?--method needs a value}
+		shift
+		;;
+	--method=*) METHOD=${1#*=} ;;
+	--dir)
+		INSTALL_DIR=${2:?--dir needs a value}
+		shift
+		;;
+	--dir=*) INSTALL_DIR=${1#*=} ;;
+	--offline) OFFLINE=1 ;;
+	--adapters)
+		ADAPTERS=${2:?--adapters needs a value}
+		shift
+		;;
+	--adapters=*) ADAPTERS=${1#*=} ;;
+	--wire-hooks) WIRE_HOOKS=1 ;;
+	--daemon) START_DAEMON=1 ;;
+	--no-daemon) START_DAEMON=0 ;;
+	--dashboard)
+		DASHBOARD=${2:?--dashboard needs a value}
+		shift
+		;;
+	--dashboard=*) DASHBOARD=${1#*=} ;;
+	-h | --help)
+		usage
+		exit 0
+		;;
+	*) die "unknown option: $1 (try --help)" ;;
 	esac
 	# If --yes was set, drop interactivity for the rest of the run.
 	if [ "$ASSUME_YES" = 1 ]; then INTERACTIVE=0; fi
@@ -165,12 +194,11 @@ install_binaries() {
 			info "Install method:"
 			dim "  1) cargo-dist installer (recommended; prebuilt, checksum-verified)"
 			dim "  2) Homebrew$(have brew || printf ' (brew not found)')"
-			dim "  3) npm/bun (@memeora/memeora)"
-			dim "  4) build from source (needs Rust/cargo)"
+			dim "  3) build from source (needs Rust/cargo)"
 			printf '%s ' "${C_BOLD}?${C_RESET} choice [1]:" >/dev/tty
 			IFS= read -r _c </dev/tty || _c=1
 			case "${_c:-1}" in
-				2) _method=brew ;; 3) _method=npm ;; 4) _method=source ;; *) _method=cargo-dist ;;
+			2) _method=brew ;; 3) _method=source ;; *) _method=cargo-dist ;;
 			esac
 		else
 			_method=cargo-dist
@@ -178,41 +206,36 @@ install_binaries() {
 	fi
 
 	case "$_method" in
-		brew)
-			have brew || die "Homebrew not found; choose another --method"
-			run brew install "${REPO%/*}/tap/memeora"
-			;;
-		npm)
-			if have bun; then run bun add -g @memeora/memeora
-			elif have npm; then run npm install -g @memeora/memeora
-			else die "neither bun nor npm found; choose another --method"; fi
-			;;
-		source)
-			have cargo || die "cargo not found; install Rust from https://rustup.rs first"
-			run cargo install --git "https://github.com/${REPO}" memeora
-			;;
-		cargo-dist|*)
-			info "fetching the cargo-dist installer"
-			_tmp=$(mktemp)
-			if ! fetch "$DIST_INSTALLER" >"$_tmp" || [ ! -s "$_tmp" ]; then
-				rm -f "$_tmp"
-				err "could not download the release installer (is a version published yet?)"
-				if have cargo && ask_yes_no "Build from source with cargo instead?" 1; then
-					run cargo install --git "https://github.com/${REPO}" memeora
-				else
-					die "no binaries installed; see https://github.com/${REPO}#install"
-				fi
+	brew)
+		have brew || die "Homebrew not found; choose another --method"
+		run brew install "${REPO%/*}/tap/memeora"
+		;;
+	source)
+		have cargo || die "cargo not found; install Rust from https://rustup.rs first"
+		run cargo install --git "https://github.com/${REPO}" memeora
+		;;
+	cargo-dist | *)
+		info "fetching the cargo-dist installer"
+		_tmp=$(mktemp)
+		if ! fetch "$DIST_INSTALLER" >"$_tmp" || [ ! -s "$_tmp" ]; then
+			rm -f "$_tmp"
+			err "could not download the release installer (is a version published yet?)"
+			if have cargo && ask_yes_no "Build from source with cargo instead?" 1; then
+				run cargo install --git "https://github.com/${REPO}" memeora
 			else
-				# Quote the install dir (it may contain spaces); no array support in sh,
-				# so branch instead of word-splitting a flat string.
-				if [ -n "$INSTALL_DIR" ]; then
-					run sh "$_tmp" --install-dir "$INSTALL_DIR"
-				else
-					run sh "$_tmp"
-				fi
-				rm -f "$_tmp"
+				die "no binaries installed; see https://github.com/${REPO}#install"
 			fi
-			;;
+		else
+			# Quote the install dir (it may contain spaces); no array support in sh,
+			# so branch instead of word-splitting a flat string.
+			if [ -n "$INSTALL_DIR" ]; then
+				run sh "$_tmp" --install-dir "$INSTALL_DIR"
+			else
+				run sh "$_tmp"
+			fi
+			rm -f "$_tmp"
+		fi
+		;;
 	esac
 
 	if [ "$DRY_RUN" != 1 ] && ! have memeora-daemon; then
@@ -254,12 +277,18 @@ choose_model() {
 SELECTED_ADAPTERS=""
 choose_adapters() {
 	step "Wire memeora into your coding tools"
-	if [ "$ADAPTERS" = none ]; then SELECTED_ADAPTERS=""; return 0; fi
+	if [ "$ADAPTERS" = none ]; then
+		SELECTED_ADAPTERS=""
+		return 0
+	fi
 	if [ "$ADAPTERS" != ask ]; then
 		SELECTED_ADAPTERS=$(printf '%s' "$ADAPTERS" | tr ',' ' ')
 		return 0
 	fi
-	if [ "$INTERACTIVE" != 1 ]; then SELECTED_ADAPTERS=""; return 0; fi
+	if [ "$INTERACTIVE" != 1 ]; then
+		SELECTED_ADAPTERS=""
+		return 0
+	fi
 
 	dim "memeora connects via MCP (recall/remember/context/list) — that part is wired"
 	dim "automatically and safely (backed up, never overwritten). Pick your tools:"
@@ -270,12 +299,15 @@ choose_adapters() {
 	[ -z "$_sel" ] && _sel=1
 	for _n in $_sel; do
 		case "$_n" in
-			1) SELECTED_ADAPTERS="$SELECTED_ADAPTERS claude" ;;
-			2) SELECTED_ADAPTERS="$SELECTED_ADAPTERS codex" ;;
-			3) SELECTED_ADAPTERS="$SELECTED_ADAPTERS antigravity" ;;
-			4) SELECTED_ADAPTERS="$SELECTED_ADAPTERS opencode" ;;
-			5) SELECTED_ADAPTERS="$SELECTED_ADAPTERS mcp" ;;
-			0) SELECTED_ADAPTERS="" ; break ;;
+		1) SELECTED_ADAPTERS="$SELECTED_ADAPTERS claude" ;;
+		2) SELECTED_ADAPTERS="$SELECTED_ADAPTERS codex" ;;
+		3) SELECTED_ADAPTERS="$SELECTED_ADAPTERS antigravity" ;;
+		4) SELECTED_ADAPTERS="$SELECTED_ADAPTERS opencode" ;;
+		5) SELECTED_ADAPTERS="$SELECTED_ADAPTERS mcp" ;;
+		0)
+			SELECTED_ADAPTERS=""
+			break
+			;;
 		esac
 	done
 }
@@ -296,10 +328,14 @@ merge_mcp_json() { # merge_mcp_json <file>
 		return 0
 	fi
 	if [ -f "$_f" ] && jq -e '.mcpServers.memeora' "$_f" >/dev/null 2>&1; then
-		ok "already configured in $_f"; return 0
+		ok "already configured in $_f"
+		return 0
 	fi
 	[ -f "$_f" ] && backup_file "$_f"
-	if [ "$DRY_RUN" = 1 ]; then dim "   would merge memeora MCP entry into $_f"; return 0; fi
+	if [ "$DRY_RUN" = 1 ]; then
+		dim "   would merge memeora MCP entry into $_f"
+		return 0
+	fi
 	mkdir -p "$(dirname "$_f")" 2>/dev/null || true
 	_tmp=$(mktemp)
 	if [ -f "$_f" ]; then
@@ -321,20 +357,42 @@ wire_claude() {
 	if [ "$WIRE_HOOKS" = 1 ]; then wire_claude_hooks; else hooks_hint claude; fi
 }
 
-wire_claude_hooks() {
-	_f="$HOME/.claude/settings.json"
-	have jq || { warn "jq needed to merge Claude hooks; skipping (printing steps)"; hooks_hint claude; return 0; }
-	mkdir -p "$HOME/.claude" 2>/dev/null || true
+merge_hooks_json() { # merge_hooks_json <host> <file>
+	_host=$1
+	_f=$2
+	have jq || {
+		warn "jq needed to merge $_host hooks; skipping"
+		return 0
+	}
+	mkdir -p "$(dirname "$_f")" 2>/dev/null || true
 	[ -f "$_f" ] || { [ "$DRY_RUN" = 1 ] || printf '{}\n' >"$_f"; }
+	if [ -f "$_f" ] &&
+		grep -Fq "memeora-hook --host $_host --event session-start" "$_f" &&
+		grep -Fq "memeora-hook --host $_host --event stop" "$_f" &&
+		grep -Fq "memeora-hook --host $_host --event pre-compact" "$_f"; then
+		ok "$_host hooks already configured in $_f"
+		return 0
+	fi
 	backup_file "$_f"
-	if [ "$DRY_RUN" = 1 ]; then dim "   would merge SessionStart/Stop/PreCompact hooks into $_f"; return 0; fi
+	if [ "$DRY_RUN" = 1 ]; then
+		dim "   would merge SessionStart/Stop/PreCompact hooks into $_f"
+		return 0
+	fi
 	_tmp=$(mktemp)
-	jq '
-	  .hooks.SessionStart = ((.hooks.SessionStart // []) + [{"hooks":[{"type":"command","command":"memeora-hook --host claude --event session-start"}]}])
-	  | .hooks.Stop = ((.hooks.Stop // []) + [{"hooks":[{"type":"command","command":"memeora-hook --host claude --event stop"}]}])
-	  | .hooks.PreCompact = ((.hooks.PreCompact // []) + [{"hooks":[{"type":"command","command":"memeora-hook --host claude --event pre-compact"}]}])
+	jq --arg host "$_host" '
+	  def add($event; $name):
+	    ("memeora-hook --host " + $host + " --event " + $event) as $cmd
+	    | .hooks[$name] = (.hooks[$name] // [])
+	    | if any(.hooks[$name][]?; any(.hooks[]?; .command? == $cmd)) then .
+	      else .hooks[$name] += [{"hooks":[{"type":"command","command":$cmd}]}]
+	      end;
+	  add("session-start"; "SessionStart") | add("stop"; "Stop") | add("pre-compact"; "PreCompact")
 	' "$_f" >"$_tmp" && mv "$_tmp" "$_f"
-	ok "wired Claude auto-capture hooks in $_f"
+	ok "wired $_host auto-capture hooks in $_f"
+}
+
+wire_claude_hooks() {
+	merge_hooks_json claude "$HOME/.claude/settings.json"
 }
 
 wire_codex() {
@@ -353,9 +411,10 @@ wire_codex() {
 		fi
 	fi
 	if [ "$WIRE_HOOKS" = 1 ]; then
-		dim "   Codex hooks: see adapters/codex/hooks/hooks.json — merge into ~/.codex/hooks.json"
+		merge_hooks_json codex "$HOME/.codex/hooks.json"
+	else
+		hooks_hint codex
 	fi
-	hooks_hint codex
 }
 
 wire_antigravity() {
@@ -366,12 +425,9 @@ wire_antigravity() {
 }
 
 wire_opencode() {
-	info "OpenCode — plugin (npm)"
-	dim "   Install the plugin and add it to ~/.config/opencode/opencode.jsonc:"
-	if have bun; then dim "     bun add -g @memeora/opencode"
-	else dim "     npm install -g @memeora/opencode"; fi
-	dim '     "plugin": ["@memeora/opencode"]'
-	dim "   (or use the MCP entry directly — OpenCode is MCP-capable)"
+	info "OpenCode — MCP"
+	dim "   Add memeora-mcp to ~/.config/opencode/opencode.jsonc:"
+	printf '   %s\n' '{"mcp":{"memeora":{"type":"local","command":["memeora-mcp"]}}}'
 }
 
 wire_mcp_generic() {
@@ -387,15 +443,18 @@ hooks_hint() { # hooks_hint <claude|codex>
 }
 
 apply_adapters() {
-	[ -z "$SELECTED_ADAPTERS" ] && { info "no adapters selected"; return 0; }
+	[ -z "$SELECTED_ADAPTERS" ] && {
+		info "no adapters selected"
+		return 0
+	}
 	for _a in $SELECTED_ADAPTERS; do
 		case "$_a" in
-			claude) wire_claude ;;
-			codex) wire_codex ;;
-			antigravity) wire_antigravity ;;
-			opencode) wire_opencode ;;
-			mcp) wire_mcp_generic ;;
-			*) warn "unknown adapter '$_a' (known: $KNOWN_ADAPTERS)" ;;
+		claude) wire_claude ;;
+		codex) wire_codex ;;
+		antigravity) wire_antigravity ;;
+		opencode) wire_opencode ;;
+		mcp) wire_mcp_generic ;;
+		*) warn "unknown adapter '$_a' (known: $KNOWN_ADAPTERS)" ;;
 		esac
 	done
 }

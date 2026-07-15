@@ -65,10 +65,11 @@ impl LlmConfig {
         })
     }
 
-    /// Whether the consent policy permits this endpoint: local is always allowed; a
-    /// remote endpoint only with explicit [`allow_remote`](LlmConfig::allow_remote).
+    /// Whether the endpoint is safe for the shipped transport. Remote LLMs remain
+    /// disabled until the client has a TLS-validating transport; a consent flag alone
+    /// cannot make raw TCP safe.
     pub fn is_allowed(&self) -> bool {
-        host_is_local(&self.endpoint) || self.allow_remote
+        host_is_local(&self.endpoint)
     }
 }
 
@@ -128,6 +129,7 @@ pub trait LlmTransport: Send + Sync {
 
 /// Read/write timeout for the loopback transport (no setter — loopback is fast or absent).
 const TRANSPORT_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Minimal blocking HTTP/1.1 transport for a loopback OpenAI-compatible server.
 pub struct HttpTransport;
@@ -150,8 +152,14 @@ impl LlmTransport for HttpTransport {
             .map_err(|e| Error::Llm(format!("write: {e}")))?;
         let mut raw = String::new();
         stream
+            .take(MAX_RESPONSE_BYTES + 1)
             .read_to_string(&mut raw)
             .map_err(|e| Error::Llm(format!("read: {e}")))?;
+        if raw.len() as u64 > MAX_RESPONSE_BYTES {
+            return Err(Error::Llm(format!(
+                "response exceeds {MAX_RESPONSE_BYTES} bytes"
+            )));
+        }
         // `Connection: close` ⇒ the server sent one non-chunked response then closed,
         // so the body is everything after the header terminator.
         raw.split_once("\r\n\r\n")
@@ -361,12 +369,13 @@ mod tests {
     }
 
     #[test]
-    fn local_allowed_remote_needs_consent() {
+    fn only_loopback_endpoints_are_allowed() {
         assert!(cfg("http://localhost:11434/v1", false).is_allowed());
         assert!(cfg("http://127.0.0.1:1234", false).is_allowed());
         assert!(cfg("http://[::1]:8080/v1", false).is_allowed());
         assert!(!cfg("http://api.openai.com/v1", false).is_allowed());
-        assert!(cfg("http://api.openai.com/v1", true).is_allowed());
+        assert!(!cfg("http://api.openai.com/v1", true).is_allowed());
+        assert!(!cfg("https://api.openai.com/v1", true).is_allowed());
         // A fragment-spoofed host must NOT be classified local (the consent-gate
         // bypass `http://evil.com#@localhost` reported in review).
         assert!(!cfg("http://evil.com:80#@localhost/v1", false).is_allowed());

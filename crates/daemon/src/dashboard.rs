@@ -23,7 +23,8 @@ use std::sync::{Arc, Mutex};
 use axum::Json;
 use axum::Router;
 use axum::extract::{Query, State};
-use axum::http::{StatusCode, Uri, header};
+use axum::http::{Request, StatusCode, Uri, header};
+use axum::middleware::{Next, from_fn};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -92,7 +93,35 @@ fn build_router(
         .route("/api/events", get(events_stream))
         // Everything else: embedded UI assets, with SPA fallback to index.html.
         .fallback(static_asset)
+        .layer(from_fn(local_host_only))
         .with_state(state))
+}
+
+/// Reject hostile Host headers. Binding to loopback alone does not prevent a DNS
+/// rebinding page from making same-origin requests to the dashboard.
+async fn local_host_only(request: Request<axum::body::Body>, next: Next) -> Response {
+    fn local(name: &str) -> bool {
+        matches!(name, "localhost" | "127.0.0.1" | "::1")
+    }
+
+    let host_ok = request
+        .headers()
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<axum::http::uri::Authority>().ok())
+        .is_some_and(|authority| local(authority.host()));
+    let origin_ok = request.headers().get(header::ORIGIN).is_none_or(|value| {
+        value
+            .to_str()
+            .ok()
+            .and_then(|value| value.parse::<Uri>().ok())
+            .and_then(|uri| uri.host().map(local))
+            .unwrap_or(false)
+    });
+    if !host_ok || !origin_ok {
+        return (StatusCode::FORBIDDEN, "dashboard is local-only").into_response();
+    }
+    next.run(request).await
 }
 
 /// Serve the dashboard on `addr` until the process exits. `db_path` is the WAL
@@ -512,13 +541,17 @@ mod tests {
         String::from_utf8(bytes.to_vec()).unwrap()
     }
 
+    fn local_request(uri: &str) -> Request<Body> {
+        Request::get(uri)
+            .header(header::HOST, "127.0.0.1:7788")
+            .body(Body::empty())
+            .unwrap()
+    }
+
     #[tokio::test]
     async fn scopes_endpoint_lists_tags_with_counts() {
         let (app, _db_path) = test_app();
-        let resp = app
-            .oneshot(Request::get("/api/scopes").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
+        let resp = app.oneshot(local_request("/api/scopes")).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
         assert!(body.contains("tag_a"), "got: {body}");
@@ -529,11 +562,7 @@ mod tests {
     async fn graph_endpoint_returns_nodes_and_edges() {
         let (app, _db_path) = test_app();
         let resp = app
-            .oneshot(
-                Request::get("/api/graph?scope=tag_a")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(local_request("/api/graph?scope=tag_a"))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -549,11 +578,30 @@ mod tests {
         // The build.rs placeholder guarantees index.html exists, so an unknown SPA
         // route serves HTML (200) rather than 404.
         let (app, _db_path) = test_app();
-        let resp = app
-            .oneshot(Request::get("/some/spa/route").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
+        let resp = app.oneshot(local_request("/some/spa/route")).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn rejects_non_local_host_and_origin() {
+        let (app, _) = test_app();
+        let bad_host = Request::get("/api/health")
+            .header(header::HOST, "attacker.example")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(bad_host).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+        let bad_origin = Request::get("/api/health")
+            .header(header::HOST, "localhost:7788")
+            .header(header::ORIGIN, "https://attacker.example")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.oneshot(bad_origin).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
     }
 
     // Owned mirrors of the response DTOs so tests can deserialize them.

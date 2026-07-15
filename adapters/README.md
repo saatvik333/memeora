@@ -6,7 +6,7 @@ server, one multi-host `memeora-hook` binary — so memory is shared across tool
 by construction (same DB, same scope tags).
 
 | Host | MCP tools | Auto-capture | Inject | Notes |
-|------|-----------|--------------|--------|-------|
+| ------ | ----------- | -------------- | -------- | ------- |
 | [Claude Code](./claude-code) | `.mcp.json` → `memeora-mcp` | `Stop` / `PreCompact` hook | `SessionStart` → `additionalContext` | installs via plugin marketplace |
 | [Codex](./codex) | `[mcp_servers]` in `config.toml` | `Stop` / `PreCompact` hook | `SessionStart` → `additionalContext` | same hook path as Claude |
 | [Antigravity](./antigravity) | `mcp_config.json` → `memeora-mcp` | `Stop` hook | `PreInvocation` → `injectSteps` | own camelCase schema |
@@ -39,9 +39,10 @@ cargo install --path crates/cli
 memeora-daemon &
 ```
 
-A first-class installer (`memeora install <host>`) and prebuilt binaries arrive
-with the release step. Each host directory has its own README with exact install
-steps and host-specific caveats.
+Use [`scripts/install.sh`](../scripts/install.sh) for guided binary and adapter setup, or
+install a release artifact with the platform installer described in the root
+[`README.md`](../README.md#install). Each host directory has its own README with exact
+configuration steps and host-specific caveats.
 
 > Hook payload schemas evolve per host; they're parsed defensively but should be
 > validated against real captured fixtures before relying on auto-capture.

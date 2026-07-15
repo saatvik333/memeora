@@ -19,8 +19,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Sender, SyncSender};
 use std::thread;
+use std::time::Duration;
 
-use interprocess::local_socket::{ListenerOptions, Stream, prelude::*};
+use interprocess::local_socket::{Listener, ListenerOptions, Stream, prelude::*};
 use memeora_proto::{Request, Response, build_name, frame};
 
 use crate::Engine;
@@ -33,6 +34,14 @@ const JOB_QUEUE_DEPTH: usize = 1024;
 /// Bound on concurrent connection threads, so a flood of clients can't exhaust
 /// threads/FDs. Excess connections are dropped (the client can retry).
 const MAX_CONNECTIONS: usize = 256;
+/// A client must identify itself promptly; this prevents idle local connections
+/// from consuming every connection slot indefinitely.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+/// A framed request cannot hold a server connection forever.
+const IO_TIMEOUT: Duration = Duration::from_secs(30);
+/// Bound client-controlled result counts before they reach SQLite/KNN queries.
+const MAX_RESULTS: usize = 1_000;
+const MAX_TOKEN_BUDGET: usize = 100_000;
 
 /// A prepared request plus the channel its response goes back on.
 struct Job {
@@ -70,10 +79,8 @@ fn spawn_writer(mut engine: Engine) -> SyncSender<Job> {
     tx
 }
 
-/// Serve requests on `socket` until the listener errors fatally. Blocks the
-/// calling thread. `engine` moves onto the dedicated writer thread; embedding and
-/// extraction run on the connection threads via a shared [`Preparer`].
-pub fn serve(engine: Engine, socket: &str) -> io::Result<()> {
+/// Acquire the daemon's singleton socket before opening any mutable state.
+pub fn bind(socket: &str) -> io::Result<Listener> {
     let already_listening = || {
         io::Error::new(
             io::ErrorKind::AddrInUse,
@@ -87,36 +94,23 @@ pub fn serve(engine: Engine, socket: &str) -> io::Result<()> {
         return Err(already_listening());
     }
 
-    let preparer = engine.preparer();
-    // Bind atomically WITHOUT try_overwrite first.  If another process snuck in
-    // and won the race (between our probe and our bind), the create_sync call
-    // returns an AddrInUse/AlreadyExists error — treat that as "another daemon
-    // won" and exit cleanly rather than propagating it as a hard error.
-    let listener = match ListenerOptions::new()
+    // Reclaim a dead filesystem socket while preserving an active listener: the
+    // interprocess overwrite operation distinguishes stale names from live peers.
+    match ListenerOptions::new()
         .name(build_name(socket)?)
+        .try_overwrite(true)
         .create_sync()
     {
-        Ok(l) => l,
-        Err(e)
-            if e.kind() == io::ErrorKind::AddrInUse || e.kind() == io::ErrorKind::AlreadyExists =>
-        {
-            // A second process bound after our probe; it's the sole writer now.
-            return Err(already_listening());
-        }
-        // The socket path exists from a previous (now dead) daemon run.
-        // We confirmed above (probe returned Err) that no live daemon owns it,
-        // so overwriting the stale file is safe.
-        Err(e)
-            if e.kind() == io::ErrorKind::ConnectionRefused
-                || e.kind() == io::ErrorKind::NotFound =>
-        {
-            ListenerOptions::new()
-                .name(build_name(socket)?)
-                .try_overwrite(true)
-                .create_sync()?
-        }
-        Err(e) => return Err(e),
-    };
+        Ok(listener) => Ok(listener),
+        Err(e) if e.kind() == io::ErrorKind::AddrInUse => Err(already_listening()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Serve requests on an already-bound singleton listener. `engine` moves onto the
+/// dedicated writer thread; embedding and extraction run on connection threads.
+pub fn serve(engine: Engine, listener: Listener) -> io::Result<()> {
+    let preparer = engine.preparer();
     let writer = spawn_writer(engine);
     let active = Arc::new(AtomicUsize::new(0));
 
@@ -162,13 +156,38 @@ pub fn serve(engine: Engine, socket: &str) -> io::Result<()> {
 /// this thread, forward to the writer, frame back the responses, until the peer
 /// closes or an I/O error occurs.
 fn handle_conn(stream: Stream, writer: &SyncSender<Job>, preparer: &Preparer) {
+    if stream.set_recv_timeout(Some(HANDSHAKE_TIMEOUT)).is_err()
+        || stream.set_send_timeout(Some(IO_TIMEOUT)).is_err()
+    {
+        return;
+    }
     let mut reader = BufReader::new(stream);
-    loop {
-        let request = match frame::read_message::<_, Request>(&mut reader) {
-            Ok(Some(request)) => request,
-            Ok(None) => break, // peer closed cleanly
-            Err(_) => break,   // truncated / bad frame
-        };
+    let hello = matches!(
+        frame::read_message::<_, Request>(&mut reader),
+        Ok(Some(Request::Hello { .. }))
+    );
+    if !hello {
+        return;
+    }
+    if reader.get_mut().set_recv_timeout(Some(IO_TIMEOUT)).is_err() {
+        return;
+    }
+
+    // The handshake is also processed by the writer so clients receive the same
+    // version/capability response as every other transport.
+    let mut next_request = Some(Request::Hello {
+        protocol_version: memeora_proto::PROTOCOL_VERSION,
+    });
+    while let Some(request) = next_request.take() {
+        if let Err(err) = validate_request_limits(&request) {
+            let _ = frame::write_message(
+                reader.get_mut(),
+                &Response::Error {
+                    message: err.to_string(),
+                },
+            );
+            break;
+        }
 
         // Embedding/extraction happens here, off the writer thread (extraction is
         // parallel; embedding serializes on the shared model — see the module docs).
@@ -195,7 +214,35 @@ fn handle_conn(stream: Stream, writer: &SyncSender<Job>, preparer: &Preparer) {
         if frame::write_message(reader.get_mut(), &response).is_err() {
             break;
         }
+        next_request = match frame::read_message::<_, Request>(&mut reader) {
+            Ok(Some(Request::Hello { .. })) => Some(Request::Hello {
+                protocol_version: memeora_proto::PROTOCOL_VERSION,
+            }),
+            Ok(Some(next)) => Some(next),
+            Ok(None) | Err(_) => None,
+        };
     }
+}
+
+fn validate_request_limits(request: &Request) -> memeora_core::Result<()> {
+    let (count, tokens) = match request {
+        Request::Recall { k, max_tokens, .. } | Request::Bundle { k, max_tokens, .. } => {
+            (*k, *max_tokens)
+        }
+        Request::List { limit, .. } => (*limit, None),
+        _ => return Ok(()),
+    };
+    if count > MAX_RESULTS {
+        return Err(memeora_core::Error::Invalid(format!(
+            "result count exceeds {MAX_RESULTS}"
+        )));
+    }
+    if tokens.is_some_and(|value| value > MAX_TOKEN_BUDGET) {
+        return Err(memeora_core::Error::Invalid(format!(
+            "token budget exceeds {MAX_TOKEN_BUDGET}"
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -236,7 +283,17 @@ mod tests {
         // The server binds before accepting; retry until it's up.
         for _ in 0..200 {
             if let Ok(stream) = Stream::connect(build_name(socket).unwrap()) {
-                return BufReader::new(stream);
+                let mut reader = BufReader::new(stream);
+                frame::write_message(
+                    reader.get_mut(),
+                    &Request::Hello {
+                        protocol_version: PROTOCOL_VERSION,
+                    },
+                )
+                .unwrap();
+                let response: Response = frame::read_message(&mut reader).unwrap().unwrap();
+                assert!(matches!(response, Response::Hello { .. }));
+                return reader;
             }
             thread::sleep(Duration::from_millis(5));
         }
@@ -246,7 +303,7 @@ mod tests {
     #[test]
     fn server_handles_framed_requests() {
         let socket = "memeora-test-server-roundtrip.sock";
-        thread::spawn(move || serve(test_engine(), socket).unwrap());
+        thread::spawn(move || serve(test_engine(), bind(socket).unwrap()).unwrap());
 
         let mut conn = connect(socket);
 
@@ -298,7 +355,7 @@ mod tests {
     #[test]
     fn concurrent_clients_share_writer() {
         let socket = "memeora-test-server-concurrent.sock";
-        thread::spawn(move || serve(test_engine(), socket).unwrap());
+        thread::spawn(move || serve(test_engine(), bind(socket).unwrap()).unwrap());
 
         let mut handles = Vec::new();
         for i in 0..8 {
@@ -352,7 +409,7 @@ mod tests {
     #[test]
     fn writer_panic_recovers_and_keeps_serving() {
         let socket = "memeora-test-server-panic-recovery.sock";
-        thread::spawn(move || serve(test_engine_with_panic_once(), socket).unwrap());
+        thread::spawn(move || serve(test_engine_with_panic_once(), bind(socket).unwrap()).unwrap());
 
         let mut conn = connect(socket);
 
@@ -397,12 +454,12 @@ mod tests {
     fn second_daemon_on_same_socket_is_refused() {
         let socket = "memeora-test-singleton.sock";
         thread::spawn(move || {
-            let _ = serve(test_engine(), socket);
+            let _ = serve(test_engine(), bind(socket).unwrap());
         });
         // Wait until the first daemon is accepting connections.
         let _conn = connect(socket);
         // A second daemon on the same socket must refuse rather than hijack it.
-        let err = serve(test_engine(), socket).unwrap_err();
+        let err = bind(socket).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::AddrInUse);
     }
 }

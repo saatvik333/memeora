@@ -18,9 +18,9 @@ Requires a running `memeora-daemon`.
 ```ts
 import { Client } from "@memeora/client";
 
-// Recommended for cross-language use: run the daemon with a filesystem socket,
-// e.g. MEMEORA_SOCKET=/tmp/memeora.sock, and pass that path here.
-const client = await Client.connect("/tmp/memeora.sock");
+// The default socket is a private per-user filesystem socket. Pass an explicit
+// MEMEORA_SOCKET path only when another host must use the same endpoint.
+const client = await Client.connect();
 
 await client.add("repo_myproject", "We use SQLite + sqlite-vec", "fact");
 const hits = await client.recall("repo_myproject", "storage engine", 5);
@@ -52,9 +52,8 @@ older daemons rather than erroring:
 
 - a **filesystem path** (contains `/` or `\`) — used verbatim; the portable choice
   for cross-language use (start the daemon with `MEMEORA_SOCKET=/path/to.sock`);
-- a **bare name** (the default `memeora-daemon.sock`) — mapped to the platform's
-  namespaced form (Windows named pipe, Linux abstract namespace). On macOS/BSD,
-  prefer a filesystem path.
+- a **bare name** — mapped to a namespaced endpoint for legacy compatibility.
+  The default is a private filesystem socket in memeora's per-user data directory.
 
 ## API
 

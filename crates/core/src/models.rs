@@ -12,7 +12,7 @@
 
 use std::fs;
 use std::io::{self, Read};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
@@ -146,13 +146,39 @@ pub fn parse_manifest(text: &str) -> Vec<(String, String)> {
 
 /// Verify every entry of `manifest_text` against files under `dir`.
 pub fn verify(dir: &Path, manifest_text: &str) -> io::Result<VerifyReport> {
+    let entries = parse_manifest(manifest_text);
+    if entries.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "model manifest contains no valid entries",
+        ));
+    }
+    let root = dir.canonicalize()?;
     let mut report = VerifyReport::default();
-    for (rel, expected) in parse_manifest(manifest_text) {
-        let path = dir.join(&rel);
+    for (rel, expected) in entries {
+        let relative = Path::new(&rel);
+        if relative.is_absolute()
+            || relative
+                .components()
+                .any(|c| !matches!(c, Component::Normal(_)))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unsafe model manifest path: {rel}"),
+            ));
+        }
+        let path = root.join(relative);
         let status = if !path.exists() {
             AssetStatus::Missing
         } else {
-            let actual = sha256_file(&path)?;
+            let canonical = path.canonicalize()?;
+            if !canonical.starts_with(&root) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("model manifest path escapes model directory: {rel}"),
+                ));
+            }
+            let actual = sha256_file(&canonical)?;
             if actual == expected {
                 AssetStatus::Ok
             } else {
@@ -308,6 +334,38 @@ shorthash  ignored.bin\n";
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].0, "spaced.bin");
         assert_eq!(parsed[1].0, "binary.bin");
+    }
+
+    #[test]
+    fn verify_rejects_empty_and_escaping_manifests() {
+        let dir = scratch("unsafe");
+        assert_eq!(
+            verify(&dir, "\n# empty\n").unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        let hash = "0".repeat(64);
+        for path in ["../outside", "/tmp/outside"] {
+            let err = verify(&dir, &format!("{hash}  {path}\n")).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_rejects_symlink_escape() {
+        use std::os::unix::fs::symlink;
+        let dir = scratch("symlink");
+        let outside = dir.parent().unwrap().join("memeora-models-outside");
+        fs::write(&outside, b"outside").unwrap();
+        symlink(&outside, dir.join("escape.bin")).unwrap();
+        let manifest = format!("{}  escape.bin\n", "0".repeat(64));
+        assert_eq!(
+            verify(&dir, &manifest).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        fs::remove_file(outside).unwrap();
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -118,9 +118,24 @@ impl Preparer {
                 // Same engine-boundary sanitization as Ingest — an explicit `remember`
                 // / `add` must not bypass the privacy invariant.
                 let content = sanitize(&content);
+                if content.trim().is_empty() {
+                    return Err(memeora_core::Error::Invalid(
+                        "memory content is empty after privacy filtering".into(),
+                    ));
+                }
+                let kind = match kind.as_str() {
+                    "fact" => MemoryKind::Fact,
+                    "preference" => MemoryKind::Preference,
+                    "episode" => MemoryKind::Episode,
+                    _ => {
+                        return Err(memeora_core::Error::Invalid(format!(
+                            "invalid memory kind: {kind}"
+                        )));
+                    }
+                };
                 let candidate = Candidate {
                     content,
-                    kind: MemoryKind::from_str_lossy(&kind),
+                    kind,
                     expires_at: None,
                     occurred_start: None,
                     occurred_end: None,
@@ -284,7 +299,9 @@ impl Engine {
     /// into [`Response::Error`].
     pub(crate) fn handle_prepared(&mut self, prepared: Prepared) -> Response {
         #[cfg(test)]
-        if let Some(message) = self.panic_once.take() {
+        if !matches!(prepared, Prepared::Hello)
+            && let Some(message) = self.panic_once.take()
+        {
             panic!("{message}");
         }
         match self.dispatch(prepared) {

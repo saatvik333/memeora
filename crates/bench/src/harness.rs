@@ -116,6 +116,14 @@ pub fn run(
         // Fresh, isolated store per bank — the engine's real ingestion surface.
         let texts: Vec<&str> = bank.docs.iter().map(|d| d.text.as_str()).collect();
         let embeddings = embedder.embed_documents(&texts)?;
+        if embeddings.len() != bank.docs.len() {
+            return Err(format!(
+                "embedder returned {} vectors for {} benchmark documents",
+                embeddings.len(),
+                bank.docs.len()
+            )
+            .into());
+        }
         let mut store = SqliteStore::open_in_memory(embedder.dim())?;
         for (doc, embedding) in bank.docs.iter().zip(embeddings) {
             store.upsert(&Memory::new(
@@ -242,6 +250,34 @@ mod tests {
         let out = run(&[b], &embedder, &cfg).unwrap();
         assert_eq!(out.results.len(), 1);
         assert_eq!(out.skipped_no_gold, 1);
+    }
+
+    #[test]
+    fn malformed_embedding_batch_is_an_error() {
+        struct ShortBatch {
+            space: memeora_core::EmbeddingSpace,
+        }
+        impl EmbeddingProvider for ShortBatch {
+            fn space(&self) -> &memeora_core::EmbeddingSpace {
+                &self.space
+            }
+            fn embed_documents(&self, _texts: &[&str]) -> memeora_core::Result<Vec<Vec<f32>>> {
+                Ok(vec![vec![0.0; self.space.dim]])
+            }
+        }
+        let embedder = ShortBatch {
+            space: memeora_core::EmbeddingSpace::new("test", "short", 3),
+        };
+        let cfg = RunConfig {
+            k: 10,
+            split: SplitChoice::All,
+            limit: None,
+        };
+        let err = run(&[bank()], &embedder, &cfg).err().unwrap();
+        assert!(
+            err.to_string()
+                .contains("1 vectors for 2 benchmark documents")
+        );
     }
 
     #[test]

@@ -5,7 +5,7 @@
   "expect": {
     "transcript_path": "/home/u/.claude/t.jsonl",
     "transcript_jsonl": "{\"message\":{\"role\":\"user\",\"content\":\"The following is persistent memory about this user/project. Use it naturally; don't force it.\\n- [preference] prefers rust\\n- [fact] works on memeora\\nplease fix the login flow\"}}\n{\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"on it, memory noted\"}]}}",
-    "captured_contains": ["user: please fix the login flow", "assistant: on it, memory noted"],
-    "captured_excludes": ["persistent memory", "- [preference]", "- [fact]"]
+    "captured_contains": ["user: please fix the login flow"],
+    "captured_excludes": ["persistent memory", "- [preference]", "- [fact]", "assistant: on it, memory noted"]
   }
 }
