@@ -133,9 +133,10 @@ jobs:
           "bun-version": "latest"
       - name: "Build dashboard assets"
         run: |
-          bun --cwd dashboard install --frozen-lockfile
-          bun --cwd dashboard run build
-          ! grep -q "hasn't been built into this binary" dashboard/dist/index.html
+          cd dashboard
+          bun install --frozen-lockfile
+          bun run build
+          ! grep -q "hasn't been built into this binary" dist/index.html
         shell: "bash"
       - name: Install dist
         run: ${{ matrix.install_dist.run }}

@@ -5,6 +5,7 @@
 - name: Build dashboard assets
   shell: bash
   run: |
-    bun --cwd dashboard install --frozen-lockfile
-    bun --cwd dashboard run build
-    ! grep -q "hasn't been built into this binary" dashboard/dist/index.html
+    cd dashboard
+    bun install --frozen-lockfile
+    bun run build
+    ! grep -q "hasn't been built into this binary" dist/index.html
